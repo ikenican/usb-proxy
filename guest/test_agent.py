@@ -31,7 +31,7 @@ class TransferTests(unittest.TestCase):
         self.mount_patch = patch.object(agent, 'MOUNT', self.destination)
         self.mount_patch.start()
         self.addCleanup(self.mount_patch.stop)
-        self.attach_patch = patch.object(agent, 'mount', return_value={'fstype': 'exfat'})
+        self.attach_patch = patch.object(agent, 'mount', return_value={'fstype': 'exfat', 'root': self.destination})
         self.attach_patch.start()
         self.addCleanup(self.attach_patch.stop)
 
@@ -123,7 +123,7 @@ class BrowserTests(unittest.TestCase):
             p = patch.object(target, value, self.root)
             p.start()
             self.addCleanup(p.stop)
-        p = patch.object(agent, 'mount', return_value={'fstype': 'exfat'})
+        p = patch.object(agent, 'mount', return_value={'fstype': 'exfat', 'root': self.root})
         p.start()
         self.addCleanup(p.stop)
         (self.root / '資料夾').mkdir()
@@ -176,6 +176,48 @@ class BrowserTests(unittest.TestCase):
         self.assertEqual(result['sha256'], hashlib.sha256(b'alpha').hexdigest())
         with self.assertRaisesRegex(ValueError, 'regular files'):
             agent.stream(self.request(path='資料夾'))
+
+
+class TransferBetweenVolumesTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        base = Path(self.temporary.name)
+        self.a, self.b = base / 'a', base / 'b'
+        self.a.mkdir(); self.b.mkdir()
+        (self.a / '照片').mkdir()
+        (self.a / '照片' / '1.jpg').write_bytes(b'one')
+        (self.a / '照片' / '空資料夾').mkdir()
+        (self.a / 'note.txt').write_bytes(b'note')
+        volumes = {'/dev/a': {'fstype': 'exfat', 'root': self.a}, '/dev/b': {'fstype': 'vfat', 'root': self.b}}
+        p = patch.object(agent, 'mount', side_effect=lambda device: volumes[device])
+        p.start()
+        self.addCleanup(p.stop)
+        self.spool = Path('/home/usbproxy/incoming') / ('selftest-' + uuid.uuid4().hex)
+        self.spool.mkdir(parents=True)
+        self.addCleanup(lambda: __import__('shutil').rmtree(self.spool, ignore_errors=True))
+
+    def transfer(self, paths, source='/dev/a', device='/dev/b', dest=''):
+        return agent.transfer({'source': source, 'device': device, 'paths': paths, 'dest': dest, 'spool': str(self.spool)})
+
+    def test_folder_and_file_copy_between_volumes(self):
+        result = self.transfer(['照片', 'note.txt'])
+        self.assertTrue(result['verified'])
+        self.assertEqual((self.b / '照片' / '1.jpg').read_bytes(), b'one')
+        self.assertTrue((self.b / '照片' / '空資料夾').is_dir())
+        self.assertEqual((self.b / 'note.txt').read_bytes(), b'note')
+        self.assertEqual((self.a / 'note.txt').read_bytes(), b'note')
+        with self.assertRaisesRegex(ValueError, 'already exists'):
+            self.transfer(['note.txt'])
+
+    def test_folder_cannot_be_copied_into_itself(self):
+        with self.assertRaisesRegex(ValueError, 'into itself'):
+            self.transfer(['照片'], device='/dev/a', dest='照片')
+
+    def test_walk_lists_files_relative_to_selection(self):
+        result = agent.walk({'device': '/dev/a', 'paths': ['照片']})
+        self.assertEqual([(f['path'], f['relative']) for f in result['files']], [('照片/1.jpg', '照片/1.jpg')])
+        self.assertIn('照片/空資料夾', result['folders'])
 
 
 class ProgressTests(unittest.TestCase):

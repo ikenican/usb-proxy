@@ -42,12 +42,45 @@ function Get-UsbDevices {
     return $result
 }
 
+# Windows drive letters per USB serial number (empty when Windows cannot mount the drive).
+function Get-UsbDriveLetters {
+    $map = @{}
+    try {
+        foreach ($disk in @(Get-Disk -ErrorAction Stop | Where-Object { $_.BusType -eq 'USB' -and $_.SerialNumber })) {
+            $letters = @(Get-Partition -DiskNumber $disk.Number -ErrorAction SilentlyContinue | Where-Object { $_.DriveLetter } | ForEach-Object { [string]$_.DriveLetter + ':' })
+            $map[$disk.SerialNumber.Trim()] = $letters
+        }
+    } catch { }
+    return $map
+}
+
+# Drives handed to Linux: [{uuid, name, serial}]. Older configs stored a single attachedUsb.
+function Get-Attached($Config) {
+    $list = @($Config.attachedUsbs | Where-Object { $_ -and $_.uuid })
+    if (-not $list.Count -and $Config.attachedUsb) {
+        $list = @([pscustomobject]@{uuid=[string]$Config.attachedUsb; name=[string]$Config.attachedName; serial=''})
+    }
+    return $list
+}
+
+function Set-Attached($Config,$List) {
+    $Config | Add-Member -NotePropertyName attachedUsbs -NotePropertyValue @($List) -Force
+    foreach ($legacy in 'attachedUsb','attachedName') { $Config.PSObject.Properties.Remove($legacy) }
+    Save-Config $Config
+}
+
+# Names valid on Linux file systems may be invalid on Windows.
+function Get-WindowsName([string]$Name) {
+    $clean = [regex]::Replace($Name,'[\\/:*?"<>|\x00-\x1f]','_').TrimEnd(' ','.')
+    if ($clean) { return $clean } else { return 'file' }
+}
+
 function Get-Info($Config) {
     $raw = Invoke-VBox @('showvminfo',$Config.vmName,'--machinereadable')
     $state = 'unknown'
     if ($raw -match '(?m)^VMState="([^"]+)"') { $state = $Matches[1] }
     if ($state -eq 'running' -and $Config.shutdownRequestedAt) {$state='stopping'}
-    return @{state=$state; attachedUsb=$Config.attachedUsb; attachedName=$Config.attachedName; vmName=$Config.vmName}
+    return @{state=$state; attached=@(Get-Attached $Config); vmName=$Config.vmName}
 }
 
 function Get-GuestStatus($Config) {
@@ -319,7 +352,7 @@ function Send-Tar($Config,[string]$JobId,$Plan) {
 }
 
 # Receives one file streamed by the agent; its JSON result arrives on stderr.
-function Receive-Stream($Config,$Request,[string]$Local,[string]$Label) {
+function Receive-Stream($Config,$Request,[string]$Local,[string]$Label,[int]$Index = 1) {
     $p = Start-SshProcess $Config 'sudo -n /usr/local/sbin/usbproxy-agent'
     $stderr = $p.StandardError.ReadToEndAsync()
     $p.StandardInput.WriteLine(($Request | ConvertTo-Json -Compress))
@@ -330,12 +363,12 @@ function Receive-Stream($Config,$Request,[string]$Local,[string]$Label) {
     $size = 0L
     $file = [IO.File]::Open($Local,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
     try {
-        Report-Transfer 'download' $Label 1 0 -Force
+        Report-Transfer 'download' $Label $Index 0 -Force
         while (($n = $in.Read($buffer,0,$buffer.Length)) -gt 0) {
             $null = $sha.TransformBlock($buffer,0,$n,$null,0)
             $file.Write($buffer,0,$n)
             $size += $n
-            Report-Transfer 'download' $Label 1 $n
+            Report-Transfer 'download' $Label $Index $n
         }
     } finally { $file.Dispose() }
     $null = $sha.TransformFinalBlock($buffer,0,0)
@@ -355,20 +388,20 @@ function Receive-Stream($Config,$Request,[string]$Local,[string]$Label) {
     return $response.data
 }
 
-function Invoke-Eject($Config) {
-    # A stopping or powered-off guest has already unmounted; only release the device.
-    if ((Get-Info $Config).state -eq 'running') { $null = Invoke-Guest $Config @{action='eject'} }
-    if ($Config.attachedUsb) {
+# Unmounts a drive's partitions in the guest, then hands the device back to Windows.
+function Invoke-Eject($Config,[string]$Uuid) {
+    $running = (Get-Info $Config).state -eq 'running'
+    foreach ($drive in @(Get-Attached $Config | Where-Object { -not $Uuid -or $_.uuid -eq $Uuid })) {
+        # Without a known serial the guest unmounts everything; other drives remount on next use.
+        if ($running) { $null = Invoke-Guest $Config @{action='eject'; serial=[string]$drive.serial} }
         try {
-            $null = Invoke-VBox @('controlvm',$Config.vmName,'usbdetach',[string]$Config.attachedUsb)
+            $null = Invoke-VBox @('controlvm',$Config.vmName,'usbdetach',[string]$drive.uuid)
         } catch {
-            $remaining=@(Get-UsbDevices -IncludeAll | Where-Object {$_.uuid -eq $Config.attachedUsb -and $_.'Current State' -eq 'Captured'})
+            $remaining=@(Get-UsbDevices -IncludeAll | Where-Object {$_.uuid -eq $drive.uuid -and $_.'Current State' -eq 'Captured'})
             if ($remaining.Count) {throw}
             # An unplugged/already released device needs only local state cleanup.
         }
-        $Config.attachedUsb = $null
-        $Config | Add-Member -NotePropertyName attachedName -NotePropertyValue $null -Force
-        Save-Config $Config
+        Set-Attached $Config @(Get-Attached $Config | Where-Object { $_.uuid -ne $drive.uuid })
     }
 }
 
@@ -386,7 +419,12 @@ function Invoke-Operation($request) {
                     try { $null = Sync-GuestAgent $config -NoReseed } catch { }
                 }
             }
-            return @{vm=$info; guest=$guest; message=$message; usb=@(Get-UsbDevices); preferredLocation=$config.preferredLocation}
+            $letters = Get-UsbDriveLetters
+            $usb = @(Get-UsbDevices | ForEach-Object {
+                $drives = if ($_.SerialNumber -and $letters.ContainsKey($_.SerialNumber.Trim())) {@($letters[$_.SerialNumber.Trim()])} else {@()}
+                $_ | Add-Member -NotePropertyName drives -NotePropertyValue $drives -PassThru
+            })
+            return @{vm=$info; guest=$guest; message=$message; usb=$usb}
         }
         'remember' {
             $location=[string]$request.location
@@ -452,25 +490,31 @@ function Invoke-Operation($request) {
         }
         'attach' {
             if ((Get-Info $config).state -ne 'running') { throw 'Start Linux first.' }
-            if ($config.attachedUsb) { throw 'Eject the currently attached device first.' }
             $devices = @(Get-UsbDevices)
             $device = @($devices | Where-Object { $_.uuid -eq $request.uuid })
             if ($device.Count -ne 1) { throw 'USB device is no longer available. Refresh the list.' }
             if ($device[0].'Current State' -notin @('Available','Busy')) { throw 'USB device cannot currently be captured.' }
+            $before = @()
+            try { $before = @((Get-GuestStatus $config).volumes | Where-Object {$_} | ForEach-Object { $_.path }) } catch { }
             # The UI requires explicit selection. No wildcard filter captures keyboards or other USB devices.
             $null = Invoke-VBox @('controlvm',$config.vmName,'usbattach',[string]$request.uuid)
-            $config.attachedUsb = [string]$request.uuid
-            $config | Add-Member -NotePropertyName attachedName -NotePropertyValue ([string]$request.name) -Force
-            Save-Config $config
-            # The guest needs a few seconds to enumerate the disk; wait for its partitions instead of a fixed delay.
+            $serial = [string]$device[0].SerialNumber
+            Set-Attached $config (@(Get-Attached $config) + @([pscustomobject]@{uuid=[string]$request.uuid; name=[string]$request.name; serial=$serial.Trim()}))
+            # The guest needs a few seconds to enumerate the disk; wait for its new partitions instead of a fixed delay.
             $deadline = (Get-Date).AddSeconds(20)
             $guest = $null
             do {
                 Start-Sleep -Seconds 1
                 try { $guest = Get-GuestStatus $config } catch { }
-            } while ((-not $guest -or @($guest.volumes | Where-Object {$_}).Count -eq 0) -and (Get-Date) -lt $deadline)
+                $new = @($guest.volumes | Where-Object { $_ -and $before -notcontains $_.path })
+            } while ((-not $guest -or $new.Count -eq 0) -and (Get-Date) -lt $deadline)
             if (-not $guest) { $guest = Get-GuestStatus $config }
-            return @{attached=$request.uuid; guest=$guest}
+            # Remember the serial Linux reports, which can differ in format from VirtualBox's.
+            $reported = @($new | ForEach-Object { $_.serial } | Where-Object {$_} | Select-Object -Unique)
+            if ($reported.Count -eq 1) {
+                Set-Attached $config @(Get-Attached $config | ForEach-Object { if ($_.uuid -eq $request.uuid) { $_.serial = [string]$reported[0] }; $_ })
+            }
+            return @{attached=$request.uuid; guest=$guest; volumes=@($new | ForEach-Object { $_.path })}
         }
         'copy' {
             if ((Get-Info $config).state -ne 'running') {throw 'Linux is not running or is shutting down.'}
@@ -521,10 +565,8 @@ function Invoke-Operation($request) {
         }
         'fetch' {
             if ((Get-Info $config).state -ne 'running') {throw 'Linux is not running or is shutting down.'}
-            # Names valid on Linux file systems may be invalid on Windows.
             $leaf = ([string]$request.path).Split('/')[-1]
-            $name = [regex]::Replace($leaf,'[\/:*?"<>|\x00-\x1f]','_').TrimEnd(' ','.')
-            if (-not $name) { $name = 'file' }
+            $name = Get-WindowsName $leaf
             $folder = Join-Path $script:Runtime ('open\' + [guid]::NewGuid().ToString('N'))
             New-Item -ItemType Directory -Path $folder -Force | Out-Null
             $local = Join-Path $folder $name
@@ -542,13 +584,72 @@ function Invoke-Operation($request) {
             }
             return @{local=$local; path=$result.path; name=$result.name}
         }
+        'transfer' {
+            # Volume to volume (or folder to folder) entirely inside the guest.
+            if ((Get-Info $config).state -ne 'running') {throw 'Linux is not running or is shutting down.'}
+            $jobId = [guid]::NewGuid().ToString('N')
+            $remote = '/home/usbproxy/incoming/' + $jobId
+            $sshBase = @(Get-SshArguments $config) + @('-p',[string]$config.sshPort,'usbproxy@127.0.0.1')
+            $null = Invoke-Native 'ssh.exe' ($sshBase + @('mkdir -- ' + $remote))
+            Start-Transfer 1 0
+            try {
+                $pollArgs = $sshBase + @('cat ' + $remote + '/.progress 2>/dev/null || true')
+                $poll = {
+                    $text = Invoke-Native 'ssh.exe' $pollArgs
+                    if ($text) {
+                        $guestProgress = $text | ConvertFrom-Json
+                        $script:Transfer.total = [Math]::Max(1L,[long]$guestProgress.total); $script:Transfer.count = [int]$guestProgress.count
+                        $script:Transfer.done = [long]$guestProgress.done
+                        Report-Transfer ([string]$guestProgress.stage) ([string]$guestProgress.file) ([int]$guestProgress.index) 0 -Force
+                    }
+                }
+                return Invoke-Guest $config @{action='transfer'; source=[string]$request.source; device=[string]$request.device
+                    paths=@($request.paths | ForEach-Object {[string]$_}); dest=[string]$request.dest; spool=$remote} -TimeoutSeconds 7200 -Poll $poll
+            } finally {
+                try { $null = Invoke-Native 'ssh.exe' ($sshBase + @('rm -rf -- ' + $remote)) } catch { }
+            }
+        }
+        'download' {
+            # Files and folders from a volume into a Windows folder; existing names are never overwritten.
+            if ((Get-Info $config).state -ne 'running') {throw 'Linux is not running or is shutting down.'}
+            $destination = [string]$request.destination
+            if (-not (Test-Path -LiteralPath $destination -PathType Container)) { throw 'Destination folder not found.' }
+            $plan = Invoke-Guest $config @{action='walk'; device=[string]$request.device; paths=@($request.paths | ForEach-Object {[string]$_})} -TimeoutSeconds 600
+            $files = @($plan.files | Where-Object {$_})
+            $toLocal = { param([string]$Relative) Join-Path $destination ((@($Relative -split '/') | ForEach-Object { Get-WindowsName $_ }) -join '\') }
+            foreach ($item in @($files | ForEach-Object { $_.relative }) + @($plan.folders | Where-Object {$_})) {
+                $top = Join-Path $destination (Get-WindowsName (($item -split '/')[0]))
+                if (Test-Path -LiteralPath $top) { throw ('Already exists on this PC: ' + (Split-Path $top -Leaf)) }
+            }
+            $total = 0L
+            foreach ($file in $files) { $total += [long]$file.size }
+            $drive = New-Object IO.DriveInfo ([IO.Path]::GetPathRoot((Resolve-Path -LiteralPath $destination).Path))
+            if ($drive.AvailableFreeSpace -lt $total + 1MB) { throw 'Not enough free space on this PC.' }
+            Start-Transfer $total $files.Count
+            foreach ($folder in @($plan.folders | Where-Object {$_})) { New-Item -ItemType Directory -Path (& $toLocal $folder) -Force | Out-Null }
+            $index = 0
+            foreach ($file in $files) {
+                $index++
+                $target = & $toLocal $file.relative
+                New-Item -ItemType Directory -Path (Split-Path $target) -Force | Out-Null
+                $partial = $target + '.usbproxy-partial'
+                try {
+                    $null = Receive-Stream $config @{action='stream'; device=[string]$request.device; path=[string]$file.path} $partial $file.relative $index
+                    Move-Item -LiteralPath $partial -Destination $target
+                } catch {
+                    Remove-Item -LiteralPath $partial -Force -ErrorAction SilentlyContinue
+                    throw
+                }
+            }
+            return @{downloaded=$files.Count; bytes=$total; destination=$destination}
+        }
         'eject' {
-            Invoke-Eject $config
+            Invoke-Eject $config ([string]$request.uuid)
             return @{ejected=$true}
         }
         'shutdown' {
-            # Safely eject first: unmount (sync) in the guest, then hand the device back to Windows.
-            $ejected = [bool]$config.attachedUsb
+            # Safely eject first: unmount (sync) in the guest, then hand the devices back to Windows.
+            $ejected = @(Get-Attached $config).Count -gt 0
             if ($ejected) { Invoke-Eject $config }
             if ((Get-Info $config).state -ne 'running') {return @{shutdown=$true; ejected=$ejected}}
             # The agent syncs, unmounts and schedules a fallback 'shutdown -h +1'.

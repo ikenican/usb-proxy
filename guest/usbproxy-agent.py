@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Privileged guest helper. Only USB-backed volumes may be mounted or written."""
+"""Privileged guest helper. Only USB-backed volumes may be mounted or written.
+
+Each volume is mounted at /mnt/usbproxy/<device name>, so several drives can be
+used at once. Request paths are always relative to a volume's root.
+"""
 import hashlib
 import json
 import os
@@ -14,6 +18,7 @@ MOUNT = Path('/mnt/usbproxy')
 INCOMING = Path('/home/usbproxy/incoming')
 AGENT = Path('/usr/local/sbin/usbproxy-agent')
 UNSAFE = '<>:"\\|?*'
+CHUNK = 1024 * 1024
 
 
 def run(*args):
@@ -25,49 +30,77 @@ def devices():
                           'PATH,TYPE,TRAN,SIZE,FSTYPE,LABEL,UUID,MOUNTPOINTS,MODEL,SERIAL'))
     result = []
 
-    def visit(node, usb=False):
+    # Partitions inherit the serial/model of their disk so the host can tell drives apart.
+    def visit(node, usb=False, serial=None, model=None):
         usb = usb or node.get('tran') == 'usb'
+        serial = node.get('serial') or serial
+        model = node.get('model') or model
         if usb and node.get('fstype') in ('vfat', 'exfat', 'ntfs', 'ext4'):
-            result.append({k: node.get(k) for k in
-                           ('path', 'size', 'fstype', 'label', 'uuid', 'mountpoints')})
+            entry = {k: node.get(k) for k in ('path', 'size', 'fstype', 'label', 'uuid', 'mountpoints')}
+            entry['serial'] = (serial or '').strip()
+            entry['model'] = (model or '').strip()
+            result.append(entry)
         for child in node.get('children', []):
-            visit(child, usb)
+            visit(child, usb, serial, model)
     for node in tree['blockdevices']:
         visit(node)
     return result
 
 
-def mounted():
-    p = subprocess.run(['findmnt', '--json', '--mountpoint', str(MOUNT)],
+def mounts():
+    """Our mounts: [{'source': device, 'target': mountpoint}]."""
+    p = subprocess.run(['findmnt', '--json', '--list', '--output', 'SOURCE,TARGET'],
                        capture_output=True, text=True)
-    return json.loads(p.stdout)['filesystems'][0] if p.returncode == 0 else None
+    if p.returncode != 0:
+        return []
+    prefix = str(MOUNT) + '/'
+    return [m for m in json.loads(p.stdout)['filesystems'] if m['target'].startswith(prefix)]
+
+
+def mount_root(device):
+    return MOUNT / Path(device).name
 
 
 def mount(device):
+    """Mount a USB volume (once) and return its description with 'root'."""
     candidates = {d['path']: d for d in devices()}
     if device not in candidates:
         raise ValueError('Only a supported USB volume may be selected')
-    current = mounted()
-    if current:
-        if os.path.realpath(current['source']) == os.path.realpath(device):
-            return candidates[device]
-        # Switching partitions: flush and release the previous one first.
-        os.sync()
-        subprocess.run(['umount', str(MOUNT)], check=True, capture_output=True, text=True)
-    if any(candidates[device].get('mountpoints') or []):
+    volume = dict(candidates[device])
+    root = mount_root(device)
+    volume['root'] = root
+    if os.path.ismount(root):
+        return volume
+    if any(volume.get('mountpoints') or []):
         raise ValueError('Volume is already mounted elsewhere')
-    MOUNT.mkdir(parents=True, exist_ok=True)
-    kind = candidates[device]['fstype']
-    driver = 'ntfs-3g' if kind == 'ntfs' else kind
-    subprocess.run(['mount', '-t', driver, '-o', 'rw,nosuid,nodev,noexec',
-                    device, str(MOUNT)], check=True, capture_output=True, text=True)
-    return candidates[device]
+    root.mkdir(parents=True, exist_ok=True)
+    driver = 'ntfs-3g' if volume['fstype'] == 'ntfs' else volume['fstype']
+    subprocess.run(['mount', '-t', driver, '-o', 'rw,nosuid,nodev,noexec', device, str(root)],
+                   check=True, capture_output=True, text=True)
+    return volume
+
+
+def unmount(serial=None):
+    """Flush and unmount our volumes; with a serial, only that drive's partitions."""
+    os.sync()
+    owners = {d['path']: d['serial'] for d in devices()}
+    released = []
+    for m in mounts():
+        if serial and owners.get(m['source']) not in (serial, None):
+            continue
+        subprocess.run(['umount', m['target']], check=True, capture_output=True, text=True)
+        try:
+            os.rmdir(m['target'])
+        except OSError:
+            pass
+        released.append(m['source'])
+    return released
 
 
 def digest(path, on_bytes=None):
     h = hashlib.sha256()
     with open(path, 'rb') as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b''):
+        for chunk in iter(lambda: stream.read(CHUNK), b''):
             h.update(chunk)
             if on_bytes:
                 on_bytes(len(chunk))
@@ -108,13 +141,13 @@ def check_name(name):
         raise ValueError('Filename cannot be safely represented on this volume')
 
 
-def resolve(relative):
-    """Map a volume-relative path to the mount point without following symlinks."""
+def resolve(root, relative):
+    """Map a volume-relative path below root without following symlinks."""
     rel = PurePosixPath(relative or '.')
     if rel.is_absolute() or '..' in rel.parts:
         raise ValueError('Invalid path')
     parts = [p for p in rel.parts if p != '.']
-    current = MOUNT
+    current = root
     for part in parts:
         current = current / part
         if current.is_symlink():
@@ -122,9 +155,85 @@ def resolve(relative):
     return current, '/'.join(parts)
 
 
+def spool_dir(value):
+    spool = Path(value).resolve()
+    if spool.parent != INCOMING or spool.is_symlink() or not spool.is_dir():
+        raise ValueError('Invalid staging directory')
+    return spool
+
+
+def check_destination(root, target, overwrite=False):
+    for part in [target, *target.parents]:
+        if part == root:
+            break
+        if part.is_symlink():
+            raise ValueError('Destination symlinks are not allowed')
+    if (target.exists() or target.is_symlink()) and not (
+            overwrite and target.is_file() and not target.is_symlink()):
+        raise ValueError('Destination already exists: ' + str(target.relative_to(root)))
+
+
+def write_verified(source, target, expected, progress, label, index, overwrite=False):
+    """Copy to a temp name, check the source hash and the read-back hash, then rename into place."""
+    target.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix='.usbproxy-', dir=target.parent)
+    try:
+        h = hashlib.sha256()
+        progress.begin('write', label, index)
+        with os.fdopen(fd, 'wb') as dest, open(source, 'rb') as src:
+            for chunk in iter(lambda: src.read(CHUNK), b''):
+                h.update(chunk)
+                dest.write(chunk)
+                progress.add(len(chunk))
+            dest.flush()
+            os.fsync(dest.fileno())
+        # A source that does not match never reaches the destination name.
+        if expected is not None and h.hexdigest() != expected:
+            raise ValueError('Staged file checksum mismatch: ' + label)
+        progress.begin('verify', label, index)
+        if digest(temporary, progress.add) != h.hexdigest():
+            raise ValueError('USB read-back checksum mismatch: ' + label)
+        # No other application writes these exclusively attached volumes.
+        if target.is_symlink() or (target.exists() and not overwrite):
+            raise ValueError('Destination appeared during copy')
+        os.replace(temporary, target)
+        return h.hexdigest()
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def collect(root, paths):
+    """Files and folders under the selected volume-relative paths, keyed by name relative to their parent."""
+    files, folders = [], []
+    for relative in paths:
+        target, rel = resolve(root, relative)
+        if target == root:
+            raise ValueError('Select files or folders, not the whole volume')
+        if target.is_symlink() or not target.exists():
+            raise ValueError('Not found: ' + rel)
+        base = target.parent
+        if target.is_file():
+            files.append((target, str(PurePosixPath(target.relative_to(base)))))
+            continue
+        folders.append(str(PurePosixPath(target.relative_to(base))))
+        for current, dirs, names in os.walk(target, followlinks=False):
+            here = Path(current)
+            dirs[:] = sorted(d for d in dirs if not (here / d).is_symlink())
+            for d in dirs:
+                folders.append(str(PurePosixPath((here / d).relative_to(base))))
+            for name in sorted(names):
+                path = here / name
+                if path.is_symlink() or not path.is_file() or name.startswith('.usbproxy-'):
+                    continue
+                files.append((path, str(PurePosixPath(path.relative_to(base)))))
+    return files, folders
+
+
 def listing(request):
     volume = mount(request['device'])
-    folder, rel = resolve(request.get('path', ''))
+    root = volume['root']
+    folder, rel = resolve(root, request.get('path', ''))
     if not folder.is_dir():
         raise ValueError('Folder not found: ' + rel)
     entries = []
@@ -139,17 +248,26 @@ def listing(request):
             link = item.is_symlink()
             entries.append({'name': item.name, 'dir': not link and item.is_dir(follow_symlinks=False),
                             'link': link, 'size': info.st_size, 'mtime': int(info.st_mtime)})
-    usage = shutil.disk_usage(MOUNT)
+    usage = shutil.disk_usage(root)
     return {'path': rel, 'entries': entries, 'free': usage.free, 'total': usage.total,
             'fstype': volume['fstype']}
 
 
+def walk(request):
+    """List every file under the selection so the host can download folders."""
+    root = mount(request['device'])['root']
+    files, folders = collect(root, request['paths'])
+    return {'files': [{'path': str(p.relative_to(root)), 'relative': r, 'size': p.stat().st_size}
+                      for p, r in files],
+            'folders': folders}
+
+
 def delete(request):
-    mount(request['device'])
+    root = mount(request['device'])['root']
     removed = []
     for relative in request['paths']:
-        target, rel = resolve(relative)
-        if target == MOUNT:
+        target, rel = resolve(root, relative)
+        if target == root:
             raise ValueError('The volume root cannot be deleted')
         if not (target.exists() or target.is_symlink()):
             raise ValueError('Not found: ' + rel)
@@ -163,8 +281,8 @@ def delete(request):
 
 
 def make_folder(request):
-    mount(request['device'])
-    parent, rel = resolve(request.get('path', ''))
+    root = mount(request['device'])['root']
+    parent, rel = resolve(root, request.get('path', ''))
     name = request['name']
     check_name(name)
     if not parent.is_dir():
@@ -178,9 +296,9 @@ def make_folder(request):
 
 
 def rename(request):
-    mount(request['device'])
-    source, rel = resolve(request['path'])
-    if source == MOUNT or not (source.exists() or source.is_symlink()):
+    root = mount(request['device'])['root']
+    source, rel = resolve(root, request['path'])
+    if source == root or not (source.exists() or source.is_symlink()):
         raise ValueError('Not found: ' + rel)
     name = request['name']
     check_name(name)
@@ -208,45 +326,39 @@ def self_update(request):
     return {'updated': True}
 
 
+def check_relative(relative):
+    rel = PurePosixPath(relative)
+    if rel.is_absolute() or not rel.parts or any(p in ('.', '..') for p in rel.parts):
+        raise ValueError('Invalid destination path')
+    for part in rel.parts:
+        check_name(part)
+    return rel
+
+
 def copy(request):
+    """Write files the host staged in the spool into a folder on a volume."""
     volume = mount(request['device'])
-    spool = Path(request['spool']).resolve()
-    if spool.parent != INCOMING or spool.is_symlink():
-        raise ValueError('Invalid staging directory')
-    base, _ = resolve(request.get('dest', ''))
+    root = volume['root']
+    spool = spool_dir(request['spool'])
+    base, _ = resolve(root, request.get('dest', ''))
     if not base.is_dir():
         raise ValueError('Destination folder not found')
     # Overwrite replaces existing regular files only (writing back an edited file).
     overwrite = bool(request.get('overwrite'))
-    manifest = json.loads((spool / 'manifest.json').read_text(encoding='utf-8-sig'))
-    files = manifest['files']
+    files = json.loads((spool / 'manifest.json').read_text(encoding='utf-8-sig'))['files']
     if not files:
         raise ValueError('No files to copy')
     required = sum(int(f['size']) for f in files)
-    if shutil.disk_usage(MOUNT).free < required + 1024 * 1024:
+    if shutil.disk_usage(root).free < required + CHUNK:
         raise ValueError('Insufficient free space on USB volume')
-    checked = []
-    seen = set()
+    checked, seen = [], set()
     for entry in files:
-        rel = PurePosixPath(entry['relative'])
-        if rel.is_absolute() or not rel.parts or any(p in ('.', '..') for p in rel.parts):
-            raise ValueError('Invalid destination path')
-        if any(any(c in part for c in UNSAFE) or part.endswith((' ', '.'))
-               for part in rel.parts):
-            raise ValueError('Filename cannot be safely represented on this volume')
-        target = base.joinpath(*rel.parts)
-        folded = str(rel).casefold()
-        if folded in seen:
+        rel = check_relative(entry['relative'])
+        if str(rel).casefold() in seen:
             raise ValueError('Duplicate destination filename')
-        seen.add(folded)
-        for part in [target, *target.parents]:
-            if part == MOUNT:
-                break
-            if part.is_symlink():
-                raise ValueError('Destination symlinks are not allowed')
-        if (target.exists() or target.is_symlink()) and not (
-                overwrite and target.is_file() and not target.is_symlink()):
-            raise ValueError('Destination already exists: ' + str(rel))
+        seen.add(str(rel).casefold())
+        target = base.joinpath(*rel.parts)
+        check_destination(root, target, overwrite)
         source = spool / entry['blob']
         if source.parent != spool or source.is_symlink() or not source.is_file():
             raise ValueError('Invalid source file')
@@ -257,50 +369,59 @@ def copy(request):
         checked.append((source, target, entry))
     # Progress counts each byte twice: written to the USB, then read back for verification.
     progress = Progress(spool / '.progress', 2 * required, len(checked))
-    completed = []
     for index, (source, target, entry) in enumerate(checked, 1):
-        target.parent.mkdir(parents=True, exist_ok=True)
-        fd, temporary = tempfile.mkstemp(prefix='.usbproxy-', dir=target.parent)
-        try:
-            staged = hashlib.sha256()
-            progress.begin('write', entry['relative'], index)
-            with os.fdopen(fd, 'wb') as dest, source.open('rb') as src:
-                for chunk in iter(lambda: src.read(1024 * 1024), b''):
-                    staged.update(chunk)
-                    dest.write(chunk)
-                    progress.add(len(chunk))
-                dest.flush()
-                os.fsync(dest.fileno())
-            # The staged copy is hashed while writing; a mismatch never reaches the destination name.
-            if staged.hexdigest() != entry['sha256']:
-                raise ValueError('Staged file checksum mismatch: ' + entry['relative'])
-            progress.begin('verify', entry['relative'], index)
-            if digest(temporary, progress.add) != entry['sha256']:
-                raise ValueError('USB read-back checksum mismatch: ' + entry['relative'])
-            # No other application writes this exclusively attached volume.
-            if target.is_symlink() or (target.exists() and not overwrite):
-                raise ValueError('Destination appeared during copy')
-            os.replace(temporary, target)
-        finally:
-            if os.path.exists(temporary):
-                os.unlink(temporary)
-        completed.append(entry['relative'])
+        write_verified(source, target, entry['sha256'], progress, entry['relative'], index, overwrite)
     os.sync()
     shutil.rmtree(spool)
-    return {'copied': completed, 'bytes': required, 'verified': True}
+    return {'copied': [e['relative'] for _, _, e in checked], 'bytes': required, 'verified': True}
+
+
+def transfer(request):
+    """Copy files and folders between volumes (or folders) inside the guest, verified by SHA-256."""
+    source = mount(request['source'])
+    destination = mount(request['device'])
+    spool = spool_dir(request['spool'])
+    base, _ = resolve(destination['root'], request.get('dest', ''))
+    if not base.is_dir():
+        raise ValueError('Destination folder not found')
+    files, folders = collect(source['root'], request['paths'])
+    for relative in request['paths']:
+        selected, _ = resolve(source['root'], relative)
+        if selected.is_dir() and (base == selected or selected in base.parents):
+            raise ValueError('A folder cannot be copied into itself')
+    targets = []
+    for relative in folders:
+        check_relative(relative)
+        check_destination(destination['root'], base / relative)
+    for path, relative in files:
+        target = base / check_relative(relative)
+        check_destination(destination['root'], target)
+        if destination['fstype'] == 'vfat' and path.stat().st_size >= 4294967296:
+            raise ValueError('FAT32 does not support files of 4 GiB or larger: ' + relative)
+        targets.append((path, target, relative))
+    required = sum(p.stat().st_size for p, _, _ in targets)
+    if shutil.disk_usage(destination['root']).free < required + CHUNK:
+        raise ValueError('Insufficient free space on the destination volume')
+    progress = Progress(spool / '.progress', 2 * required, len(targets))
+    for relative in folders:
+        (base / relative).mkdir(parents=True, exist_ok=True)
+    for index, (path, target, relative) in enumerate(targets, 1):
+        write_verified(path, target, None, progress, relative, index)
+    os.sync()
+    return {'copied': [r for _, _, r in targets], 'bytes': required, 'verified': True}
 
 
 def stream(request):
     """Write one file's bytes to stdout; the result (with SHA-256) goes to stderr."""
-    mount(request['device'])
-    source, rel = resolve(request['path'])
+    root = mount(request['device'])['root']
+    source, rel = resolve(root, request['path'])
     if source.is_symlink() or not source.is_file():
         raise ValueError('Only regular files can be opened')
     h = hashlib.sha256()
     size = 0
     out = sys.stdout.buffer
     with source.open('rb') as src:
-        for chunk in iter(lambda: src.read(1024 * 1024), b''):
+        for chunk in iter(lambda: src.read(CHUNK), b''):
             h.update(chunk)
             out.write(chunk)
             size += len(chunk)
@@ -312,30 +433,15 @@ def dispatch(request):
     action = request['action']
     if action == 'status':
         return {'ready': Path('/var/lib/usbproxy/ready').exists(),
-                'volumes': devices(), 'mounted': mounted()}
-    if action == 'copy':
-        return copy(request)
-    if action == 'list':
-        return listing(request)
-    if action == 'delete':
-        return delete(request)
-    if action == 'mkdir':
-        return make_folder(request)
-    if action == 'rename':
-        return rename(request)
-    if action == 'stream':
-        return stream(request)
-    if action == 'self-update':
-        return self_update(request)
+                'volumes': devices(), 'mounted': mounts()}
+    handlers = {'copy': copy, 'transfer': transfer, 'list': listing, 'walk': walk, 'delete': delete,
+                'mkdir': make_folder, 'rename': rename, 'stream': stream, 'self-update': self_update}
+    if action in handlers:
+        return handlers[action](request)
     if action == 'eject':
-        os.sync()
-        if mounted():
-            subprocess.run(['umount', str(MOUNT)], check=True, capture_output=True, text=True)
-        return {'unmounted': True}
+        return {'unmounted': unmount(request.get('serial') or None)}
     if action == 'shutdown':
-        os.sync()
-        if mounted():
-            subprocess.run(['umount', str(MOUNT)], check=True, capture_output=True, text=True)
+        unmount()
         subprocess.Popen(['shutdown', '-h', '+1'])
         return {'shutdown': True}
     raise ValueError('Unknown action')

@@ -14,12 +14,12 @@ Target: Windows 10/11 x64 without dev tools. Everything runs on built-in Windows
 |---|---|
 | `Start-USBProxy.cmd` | Launches `src/UsbProxy.ps1` (hidden console, STA). |
 | `Setup-USBProxy.cmd` | `scripts/Install-Host.ps1` (elevated; installs signed VirtualBox 7.2.22: app + USB only) then `scripts/Prepare-VM.ps1`. |
-| `src/UsbProxy.ps1` | WinForms UI. Runs each operation via `Begin-Operation` → spawns `scripts/Worker.ps1` in its own process; a 250 ms timer polls for the response. |
+| `src/UsbProxy.ps1` | WinForms UI: two panes in a SplitContainer — left `$win` browses Windows (special folders, drives, folders; synchronous .NET IO), right `$lin` browses volumes in Linux (async via worker `list`). Pane = hashtable (List, Empty, Large image list, Location, History, Back/Up/View). Event handlers find their pane with `Get-PaneOf $sender`. Runs each operation via `Begin-Operation` → spawns `scripts/Worker.ps1`; a 250 ms timer polls for the response and runs `$script:followUp`. Copies: Windows→Linux `copy`, Linux→Linux `transfer`, Linux→Windows `download` (drag-drop with custom format `UsbProxy.LinuxItems`, Ctrl+C/V, or "send to other pane"). |
 | `src/AppleUi.cs` | Custom controls compiled at startup with `Add-Type` (**C# 5 only, ASCII only** — csc reads the file in the system code page). Theme, Card, PillButton, PopupSelect, ThinProgress, PenguinBadge, MenuRenderer, FileEntry, ShellIcons (Windows shell icons/type names), ExplorerListView (Explorer theme, natural sort, Ctrl+wheel event, icon spacing), DeviceChangeWatcher (WM_DEVICECHANGE). |
 | `src/app.ico`, `src/penguin.png` | Window icon; Linux badge drawn on drives. Generated from `linxupenguin.png`. Use the PNG for drawing: .NET cannot decode PNG-compressed ICO frames. |
-| `scripts/Worker.ps1` | One request per process: `status, start, shutdown, attach, eject, list, delete, mkdir, rename, copy, fetch`. Reads `-RequestFile`, writes `-ResponseFile` `{ok,data|error}`. Holds `runtime/operation.lock`. Writes progress to `<ResponseFile>.progress`. |
+| `scripts/Worker.ps1` | One request per process: `status, start, shutdown, attach, eject, list, delete, mkdir, rename, copy, transfer, download, fetch`. Several drives can be attached: `config.attachedUsbs = [{uuid,name,serial}]` (serial as Linux reports it, used to unmount one drive on eject); `status` maps VirtualBox USB devices to Windows drive letters by serial (`Get-Disk`). Reads `-RequestFile`, writes `-ResponseFile` `{ok,data|error}`. Holds `runtime/operation.lock`. Writes progress to `<ResponseFile>.progress`. |
 | `scripts/Common.ps1` | Paths, `Invoke-Native` (with `-Poll` callback), `Invoke-Guest` (ssh → `sudo -n /usr/local/sbin/usbproxy-agent`, JSON on stdin), config helpers. |
-| `guest/usbproxy-agent.py` | Privileged guest agent (runs as root via a single sudoers entry). Only mounts partitions whose block-device ancestry has `TRAN=usb`, at `/mnt/usbproxy`. Paths are volume-relative and never follow symlinks (`resolve()`). |
+| `guest/usbproxy-agent.py` | Privileged guest agent (runs as root via a single sudoers entry). Only mounts partitions whose block-device ancestry has `TRAN=usb`, each at `/mnt/usbproxy/<device name>` (several at once). Actions include `walk` (files under a selection) and `transfer` (volume→volume, verified). Paths are volume-relative and never follow symlinks (`resolve()`). |
 | `guest/test_agent.py` | Unit tests, run inside the VM (see Testing). |
 | `scripts/New-GuestSeed.ps1` | cloud-init NoCloud seed ISO (user, key, agent via `write_files`, and `guest/packages/*.deb` installed with `dpkg -i` from the ISO — no apt, no network). `-IsoPath/-SeedDirectory` build a seed elsewhere (tests). |
 | `scripts/Build-Package.ps1` | Builds `dist/USBProxy-<timestamp>` (scripts, src, guest, docs, the two installers + checksums, manifest). |
@@ -46,9 +46,10 @@ Target: Windows 10/11 x64 without dev tools. Everything runs on built-in Windows
 5. WinForms anchoring: size a docked panel **before** adding anchored children, or they overflow. ListView column widths and ImageList sizes are not auto-scaled — multiply by `$scale` (DeviceDpi/96). ImageList images max 256 px.
 6. Large-icon view needs `LVM_SETICONSPACING` (ExplorerListView.SetIconSpacing) or big icons overlap.
 7. Jumbo shell icons for types without 256 px art sit in a corner; `ShellIcons.Render` falls back to the 48 px list.
-8. Don't use `.GetNewClosure()` for the worker's poll callback — it hides script-scope functions. Plain scriptblocks see the caller's variables via dynamic scope.
+8. Never use `.GetNewClosure()` (worker poll callbacks or UI event handlers): the closure runs in a dynamic module that cannot see the script's own functions. Plain scriptblocks see the caller's variables via dynamic scope; UI handlers use `param($sender,$e)` + `Get-PaneOf $sender`.
 9. When testing worker flows, run each request in a **separate `powershell.exe`** like the UI does; dot-sourcing/`&`-calling Worker.ps1 in one session pollutes `$script:` state.
 10. Media registry: if a test VDI is deleted while still registered, the next `convertfromraw` to that path fails ("medium lock list"); `closemedium disk <uuid>` the stale entry. Read a running VM's serial log with `FileShare.ReadWrite`.
+11. ListView groups stop rendering after `Groups.Clear()` + re-adding (only List view, which ignores groups, still showed items). The UI no longer uses groups.
 
 ## Testing
 
@@ -71,5 +72,7 @@ Versions start at `v0.0.1` (pre-release). Bump the patch/minor for each publishe
 - Verified: emulated FAT32 USB end-to-end (copy with progress, stream download, write-back, save, rename, delete, duplicate refusal); physical SanDisk exFAT capture/copy/release (earlier version); live UI startup listing the real drive.
 - Verified offline install: fresh VM from the official image with the network cable unplugged reached ready in 156 s (dpkg from seed ISO; apt never ran).
 - Not yet verified: full new UI flow on a physical drive; NTFS writes; other device models; target machines with USBSTOR disabled; real Explorer drag-and-drop and Ctrl+wheel by hand (simulated only).
-- Ideas not done: drag files *out* to Explorer, cancel button for transfers, sort arrows in the column header, multiple drives in Linux at once (worker allows one).
+- Verified for 0.0.2: two virtual USB drives mounted at once, folder transfer between them, folder download to Windows, no-overwrite on both sides; live UI maps the real SanDisk to its drive letter. Eject-by-serial is untested (virtual disks share a serial).
+- Ideas not done: drag Linux files out to Explorer, cancel button for transfers, sort arrows in the column header, rename/delete on the Windows side.
+- Legacy scripts (`Test-Integration.ps1`, `Test-PhysicalUsb.ps1`, `Update-Guest.ps1`) predate multi-drive and sealed images.
 - The repo is private and has no license yet.

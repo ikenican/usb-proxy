@@ -560,6 +560,21 @@ namespace UsbProxyUi
 
         public static Bitmap ForFile(string name, bool folder, int size) { return Render(Query(name, folder, SHGFI_SYSICONINDEX).iIcon, size); }
 
+        // The icon of an existing path (drives, special folders), as Explorer shows it.
+        public static Bitmap ForPath(string path, int size)
+        {
+            var info = new SHFILEINFO();
+            SHGetFileInfo(path, 0, ref info, (uint)Marshal.SizeOf(info), SHGFI_SYSICONINDEX);
+            return Render(info.iIcon, size);
+        }
+
+        public static string PathTypeName(string path)
+        {
+            var info = new SHFILEINFO();
+            SHGetFileInfo(path, 0, ref info, (uint)Marshal.SizeOf(info), SHGFI_TYPENAME);
+            return info.szTypeName;
+        }
+
         public static Bitmap Stock(uint siid, int size)
         {
             var info = new SHSTOCKICONINFO();
