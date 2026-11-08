@@ -21,10 +21,11 @@ Target: Windows 10/11 x64 without dev tools. Everything runs on built-in Windows
 | `scripts/Common.ps1` | Paths, `Invoke-Native` (with `-Poll` callback), `Invoke-Guest` (ssh → `sudo -n /usr/local/sbin/usbproxy-agent`, JSON on stdin), config helpers. |
 | `guest/usbproxy-agent.py` | Privileged guest agent (runs as root via a single sudoers entry). Only mounts partitions whose block-device ancestry has `TRAN=usb`, at `/mnt/usbproxy`. Paths are volume-relative and never follow symlinks (`resolve()`). |
 | `guest/test_agent.py` | Unit tests, run inside the VM (see Testing). |
-| `scripts/New-GuestSeed.ps1` | cloud-init NoCloud seed ISO (user, key, packages, agent via `write_files`). |
+| `scripts/New-GuestSeed.ps1` | cloud-init NoCloud seed ISO (user, key, agent via `write_files`, and `guest/packages/*.deb` installed with `dpkg -i` from the ISO — no apt, no network). `-IsoPath/-SeedDirectory` build a seed elsewhere (tests). |
 | `scripts/Build-Package.ps1` | Builds `dist/USBProxy-<timestamp>` (scripts, src, guest, docs, the two installers + checksums, manifest). |
 | `scripts/Test-Integration.ps1`, `New-ValidationDisk.ps1`, `Test-PhysicalUsb.ps1`, `Verify-Project.ps1` | Older validation scripts (emulated FAT32 USB disk; physical drive). Still compatible with the worker. |
 | `runtime/` | **Per machine, never commit**: `config.json`, `id_ed25519` (private key), VM, `jobs/`, `open/` (local copies of opened files), `ui.json` (view/zoom/window size). |
+| `guest/packages/` | The 7 Debian 13 .deb files the base cloud image lacks (exfatprogs, ntfs-3g, libntfs-3g89t64, fuse3, libgcrypt20, libgpg-error0, libgpg-error-l10n) + `SHA256SUMS` (matches Debian's signed index). Setup is fully offline. If the Debian base image is ever updated, regenerate these against it (install online once, copy from `/var/cache/apt/archives`, verify with `apt-cache show`). |
 | `downloads/` | `VirtualBox-7.2.22-175245-Win.exe`, `debian-13-generic-amd64.tar.xz` (not in git; in the release zip) + tracked checksum files. |
 
 ## Key flows
@@ -64,6 +65,7 @@ Target: Windows 10/11 x64 without dev tools. Everything runs on built-in Windows
 ## Status / open items
 
 - Verified: emulated FAT32 USB end-to-end (copy with progress, stream download, write-back, save, rename, delete, duplicate refusal); physical SanDisk exFAT capture/copy/release (earlier version); live UI startup listing the real drive.
+- Verified offline install: fresh VM from the official image with the network cable unplugged reached ready in 156 s (dpkg from seed ISO; apt never ran).
 - Not yet verified: full new UI flow on a physical drive; NTFS writes; other device models; target machines with USBSTOR disabled; real Explorer drag-and-drop and Ctrl+wheel by hand (simulated only).
 - Ideas not done: drag files *out* to Explorer, cancel button for transfers, sort arrows in the column header, multiple drives in Linux at once (worker allows one).
 - The repo is private and has no license yet.

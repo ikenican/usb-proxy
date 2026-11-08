@@ -12,7 +12,7 @@ temporarily changes machine-wide services and COM registration.
 The prototype uses an official, hash-checked, signed VirtualBox installer.
 No Extension Pack, host-only networking, bridged networking or developer
 toolchain is installed. The guest has NAT with SSH bound to host loopback.
-First boot needs internet to install Linux filesystem utilities.
+Setup is fully offline: the Linux filesystem utilities ship as verified .deb files in guest/packages.
 
 Files are staged locally and in the VM, then checked with SHA-256 before
 and after writing. Existing destination files are never deliberately

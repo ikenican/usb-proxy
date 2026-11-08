@@ -18,7 +18,7 @@
 ## 安裝與使用（測試機）
 
 1. 從 [Releases](../../releases) 下載 `USBProxy-*-full.zip`，解壓縮到本機硬碟。
-2. 執行 `Setup-USBProxy.cmd` 並核准系統管理員提示（安裝官方簽章的 Oracle VirtualBox，僅含主程式與 USB 支援，並建立 Linux 虛擬機）。第一次啟動 Linux 需要網路下載套件。
+2. 執行 `Setup-USBProxy.cmd` 並核准系統管理員提示（安裝官方簽章的 Oracle VirtualBox，僅含主程式與 USB 支援，並建立 Linux 虛擬機）。全程可離線安裝：Linux 所需套件已隨附在部署包中。
 3. 執行 `Start-USBProxy.cmd`。詳細操作見 [使用說明.txt](使用說明.txt)。
 
 測試機不需要 Visual Studio、WDK 或 Python。

@@ -2,7 +2,7 @@ USB Proxy 開發版
 
 開啟方式
 全新機台先執行 Setup-USBProxy.cmd，核准 Oracle 安裝的 UAC 提示。
-首次啟動 Linux 需要網路下載客體套件，不需要在 Windows 安裝 Python。
+可完全離線安裝：Linux 所需套件已隨附（guest\packages），不需要網路，也不需要在 Windows 安裝 Python。
 雙擊 Start-USBProxy.cmd。視窗可調整大小、最大化與最小化。
 1. 開啟後顯示「本機」：插入的隨身碟列在「在 Windows 中」。插拔隨身碟會自動更新。
 2. 按兩下隨身碟 → 確認「切換到 Linux」。Linux 未啟動時會自動啟動（顯示進度與預估剩餘時間），

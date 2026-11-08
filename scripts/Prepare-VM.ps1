@@ -26,6 +26,8 @@ $vdi = Join-Path $script:Runtime 'usbproxy.vdi'
 Write-Output 'Converting Linux disk to dynamic VDI...'
 $null = Invoke-Native (Get-VBox) @('convertfromraw',$raw[0].FullName,$vdi,'--format','VDI','--variant','Standard') -TimeoutSeconds 600
 $null = Invoke-VBox @('modifymedium','disk',$vdi,'--resize','32768')
+# The extracted raw image (about 3 GB) is only an intermediate for the VDI.
+Remove-Item -LiteralPath $diskDir -Recurse -Force
 $key = Join-Path $script:Runtime 'id_ed25519'
 # .NET starts ssh-keygen directly, so the empty passphrase argument is preserved.
 $null = Invoke-Native 'ssh-keygen.exe' @('-t','ed25519','-f',$key,'-N','','-C','usbproxy-local')
