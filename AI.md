@@ -34,6 +34,7 @@ Target: Windows 10/11 x64 without dev tools. Everything runs on built-in Windows
 - **Copy (upload)**: worker builds a plan, streams a tar (`file-NNNNNNNN` blobs + `manifest.json`) over ssh stdin into `/home/usbproxy/incoming/<job>`, hashing on the fly; then agent `copy` writes each file to a `.usbproxy-*` temp, checks the staged hash while writing, fsyncs, reads it back (SHA-256), and `os.replace`s it. Existing names are refused unless `overwrite` (edit write-back, regular files only). Progress units = 3 × bytes (upload 1×, write + read-back 2×); the agent writes `<spool>/.progress`, which the worker polls over ssh once a second.
 - **Open / save (download)**: agent `stream` writes raw bytes to stdout and the JSON result (size, sha256) to **stderr**; the worker hashes while receiving into `runtime/open/<guid>/<name>` and verifies. The UI watches opened files and offers write-back when the timestamp changes and is stable.
 - **Start**: boot with serial console logged to `logs/vm-serial.log`. If the console stops growing for 90 s (240 s on first boot) the VM is power-cycled once. Boot durations go to `config.bootSeconds` and drive the UI's ETA. After ready, `Sync-GuestAgent` compares the agent hash; it uses `self-update` (new agents) or re-seeds cloud-init (agents older than self-update). `status` also self-updates a running guest (no reseed).
+- **Sealed clean image**: the first successful `start` after provisioning shuts down, sets the VDI to VirtualBox `immutable` (`Set-DiskType`), and boots again. From then on VirtualBox resets the differencing image at every VM start, so the guest always boots the same clean state (base stays ~1.3 GB; a session's changes live only in the diff until the next start). Consequences: anything written in the guest is temporary, and `Sync-GuestAgent` re-pushes the agent each boot when the base copy is older (fast self-update). Anything that must persist in the guest (re-seeding) must `Set-DiskType normal` first, then let `start` seal again — `Sync-GuestAgent`'s reseed path does this; the legacy `scripts/Update-Guest.ps1` does not.
 - **Shutdown**: auto-eject (unmount + `usbdetach`), agent schedules `shutdown -h +1`, then ACPI power button; worker waits until `poweroff` (≈5 s).
 
 ## Hard-won lessons (do not regress)
@@ -47,6 +48,7 @@ Target: Windows 10/11 x64 without dev tools. Everything runs on built-in Windows
 7. Jumbo shell icons for types without 256 px art sit in a corner; `ShellIcons.Render` falls back to the 48 px list.
 8. Don't use `.GetNewClosure()` for the worker's poll callback — it hides script-scope functions. Plain scriptblocks see the caller's variables via dynamic scope.
 9. When testing worker flows, run each request in a **separate `powershell.exe`** like the UI does; dot-sourcing/`&`-calling Worker.ps1 in one session pollutes `$script:` state.
+10. Media registry: if a test VDI is deleted while still registered, the next `convertfromraw` to that path fails ("medium lock list"); `closemedium disk <uuid>` the stale entry. Read a running VM's serial log with `FileShare.ReadWrite`.
 
 ## Testing
 
@@ -57,6 +59,8 @@ Target: Windows 10/11 x64 without dev tools. Everything runs on built-in Windows
 - Physical drive: capturing takes it away from Windows — ask the user first.
 
 ## Releasing
+
+Versions start at `v0.0.1` (pre-release). Bump the patch/minor for each published package.
 
 1. `scripts/Build-Package.ps1` → `dist/USBProxy-<timestamp>` (requires the two installers in `downloads/`; get them from the latest release zip).
 2. Keep only the newest folder in `dist/` (user preference).

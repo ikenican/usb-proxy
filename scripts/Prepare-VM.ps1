@@ -50,4 +50,4 @@ $null = Invoke-VBox @('storagectl',$name,'--name','SATA','--add','sata','--contr
 $null = Invoke-VBox @('storageattach',$name,'--storagectl','SATA','--port','0','--device','0','--type','hdd','--medium',$vdi)
 $null = Invoke-VBox @('storageattach',$name,'--storagectl','SATA','--port','1','--device','0','--type','dvddrive','--medium',$iso)
 Write-Output "VM prepared: $name; SSH loopback port: $port"
-Write-Output 'The first boot installs guest filesystem utilities using NAT internet access.'
+Write-Output 'The first start installs the bundled guest packages offline, then seals the disk as a clean image.'

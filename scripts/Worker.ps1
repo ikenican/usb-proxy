@@ -77,6 +77,38 @@ function Start-GuestVm($Config) {
     $null = Invoke-VBox @('startvm',$Config.vmName,'--type','headless')
 }
 
+# The provisioned Linux disk is sealed as an immutable image: VirtualBox discards every change
+# at each VM start, so the guest always boots from the same clean state and never grows.
+function Test-DiskSealed($Config) {
+    return [bool]((Invoke-VBox @('showmediuminfo','disk',[string]$Config.disk)) -match '(?m)^Type:\s+immutable')
+}
+
+function Set-DiskType($Config,[string]$Type) {
+    $vm = $Config.vmName
+    $null = Invoke-VBox @('storageattach',$vm,'--storagectl','SATA','--port','0','--device','0','--medium','none')
+    # Remove the differencing image VirtualBox keeps for an immutable disk before changing its type.
+    $info = Invoke-VBox @('showmediuminfo','disk',[string]$Config.disk)
+    $uuid = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
+    $block = [regex]::Match($info,"(?m)^Child UUIDs:\s*$uuid(?:\r?\n\s+$uuid)*")
+    foreach ($child in [regex]::Matches($block.Value,$uuid) | ForEach-Object Value) {
+        try { $null = Invoke-VBox @('closemedium','disk',$child,'--delete') } catch { }
+    }
+    $null = Invoke-VBox @('modifymedium','disk',[string]$Config.disk,'--type',$Type)
+    $null = Invoke-VBox @('storageattach',$vm,'--storagectl','SATA','--port','0','--device','0','--type','hdd','--medium',[string]$Config.disk)
+}
+
+function Stop-GuestVm($Config) {
+    try { $null = Invoke-Guest $Config @{action='shutdown'} } catch { }
+    try { $null = Invoke-VBox @('controlvm',$Config.vmName,'acpipowerbutton') } catch { }
+    $deadline = (Get-Date).AddSeconds(90)
+    while ((Get-Info $Config).state -ne 'poweroff') {
+        if ((Get-Date) -gt $deadline) { $null = Invoke-VBox @('controlvm',$Config.vmName,'poweroff'); Start-Sleep -Seconds 2; break }
+        Start-Sleep -Seconds 2
+    }
+    $Config | Add-Member -NotePropertyName shutdownRequestedAt -NotePropertyValue $null -Force
+    Save-Config $Config
+}
+
 function Wait-GuestReady($Config,[int]$Seconds) {
     $deadline = (Get-Date).AddSeconds($Seconds)
     while ((Get-Date) -lt $deadline) {
@@ -112,16 +144,10 @@ function Sync-GuestAgent($Config,[switch]$NoReseed) {
         if ($_.Exception.Message -notmatch 'Unknown action') { throw }
         if ($NoReseed) { return $false }
         # Agents older than self-update are replaced by re-running cloud-init with a fresh seed.
-        try { $null = Invoke-Guest $Config @{action='shutdown'} } catch { }
-        try { $null = Invoke-VBox @('controlvm',$Config.vmName,'acpipowerbutton') } catch { }
-        $deadline = (Get-Date).AddSeconds(90)
-        while ((Get-Info $Config).state -ne 'poweroff') {
-            if ((Get-Date) -gt $deadline) { $null = Invoke-VBox @('controlvm',$Config.vmName,'poweroff'); Start-Sleep -Seconds 2; break }
-            Start-Sleep -Seconds 2
-        }
+        # The disk is unsealed so the update persists; the caller seals it again afterwards.
+        Stop-GuestVm $Config
+        if (Test-DiskSealed $Config) { Set-DiskType $Config 'normal' }
         $null = & (Join-Path $PSScriptRoot 'New-GuestSeed.ps1')
-        $Config | Add-Member -NotePropertyName shutdownRequestedAt -NotePropertyValue $null -Force
-        Save-Config $Config
         Start-GuestVm $Config
         if (-not (Wait-GuestReady $Config 600)) { throw 'Linux did not come back after updating the guest agent.' }
     } finally {
@@ -394,7 +420,18 @@ function Invoke-Operation($request) {
                         Save-Config $config
                     }
                     $updated = Sync-GuestAgent $config
-                    return @{ready=$true; vmName=$config.vmName; retried=$retried; agentUpdated=$updated}
+                    $sealed = $false
+                    if (-not (Test-DiskSealed $config)) {
+                        # First run after provisioning: freeze this clean state as the image every start resets to.
+                        Write-Progress-File 'sealing'
+                        Stop-GuestVm $config
+                        Set-DiskType $config 'immutable'
+                        Start-GuestVm $config
+                        if (-not (Wait-GuestReady $config 300)) { throw 'Linux did not start from the sealed image.' }
+                        $null = Sync-GuestAgent $config
+                        $sealed = $true
+                    }
+                    return @{ready=$true; vmName=$config.vmName; retried=$retried; agentUpdated=$updated; sealed=$sealed}
                 }
                 $size = Get-SerialLogSize
                 if ($size -ne $lastSize) { $lastSize = $size; $lastGrowth = Get-Date }

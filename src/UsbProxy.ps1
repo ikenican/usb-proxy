@@ -722,12 +722,13 @@ function Update-BootProgress {
             # The estimate restarts for a power-cycled boot or a one-time agent update.
             $script:bootPhase = $phase; $script:bootStarted = Get-Date
             if ($phase -eq 'retry') {Log-Line 'Linux 開機停滯，已自動重新啟動。'}
-            if ($phase -eq 'updating') {$script:bootEstimate = [Math]::Max($script:bootEstimate,20); Log-Line '正在更新 Linux 內的元件（只需一次）。'}
+            if ($phase -eq 'updating') {$script:bootEstimate = [Math]::Max($script:bootEstimate,20); Log-Line '正在更新 Linux 內的元件。'}
+            if ($phase -eq 'sealing') {$script:bootEstimate = [Math]::Max($script:bootEstimate,40); Log-Line '正在保存乾淨的 Linux 映像（只需一次），之後每次啟動都從這個狀態開始。'}
         }
     }
     $elapsed = ((Get-Date) - $script:bootStarted).TotalSeconds
     $estimate = $script:bootEstimate
-    $prefix = switch ($script:bootPhase) { 'retry' {'重新啟動中'} 'updating' {'正在更新元件'} default {'正在啟動'} }
+    $prefix = switch ($script:bootPhase) { 'retry' {'重新啟動中'} 'updating' {'正在更新元件'} 'sealing' {'正在保存乾淨映像'} default {'正在啟動'} }
     if ($elapsed -lt $estimate) {
         $bootProgress.Value = [int](90 * $elapsed / $estimate)
         $linuxDetail.Text = ('{0}… 預估剩餘 {1}' -f $prefix,(Format-Duration ([int][Math]::Ceiling($estimate - $elapsed))))
