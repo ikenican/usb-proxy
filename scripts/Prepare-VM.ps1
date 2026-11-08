@@ -30,7 +30,10 @@ $null = Invoke-VBox @('modifymedium','disk',$vdi,'--resize','32768')
 Remove-Item -LiteralPath $diskDir -Recurse -Force
 $key = Join-Path $script:Runtime 'id_ed25519'
 # .NET starts ssh-keygen directly, so the empty passphrase argument is preserved.
-$null = Invoke-Native 'ssh-keygen.exe' @('-t','ed25519','-f',$key,'-N','','-C','usbproxy-local')
+# A key left by an interrupted earlier run is reused (ssh-keygen would stop at its overwrite prompt).
+if (-not (Test-Path -LiteralPath $key)) {
+    $null = Invoke-Native 'ssh-keygen.exe' @('-t','ed25519','-f',$key,'-N','','-C','usbproxy-local')
+}
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent().Name
 $null = Invoke-Native 'icacls.exe' @($key,'/inheritance:r','/grant:r',($identity + ':(F)'))
 $iso = & "$PSScriptRoot\New-GuestSeed.ps1"

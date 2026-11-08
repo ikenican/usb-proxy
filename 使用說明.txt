@@ -1,9 +1,12 @@
 USB Proxy 開發版
 
 開啟方式
-全新機台先執行 Setup-USBProxy.cmd，核准 Oracle 安裝的 UAC 提示。
-可完全離線安裝：Linux 所需套件已隨附（guest\packages），不需要網路，也不需要在 Windows 安裝 Python。
-雙擊 Start-USBProxy.cmd。視窗可調整大小、最大化與最小化。
+只要雙擊 Start-USBProxy.cmd。視窗可調整大小、最大化與最小化。
+全新機台第一次開啟時會詢問是否安裝，按「確定」後自動完成（約 3～5 分鐘，不需要網路）：
+  安裝 VirtualBox（Windows 會詢問系統管理員權限，請按「是」）→ 建立 Linux → 第一次啟動並封存乾淨映像。
+  過程中上方會顯示目前步驟與預估剩餘時間。若先前取消，按上方「安裝」即可重新開始。
+（Setup-USBProxy.cmd 仍可單獨執行，效果相同。）
+可完全離線安裝：Linux 所需套件已隨附（guest\packages），也不需要在 Windows 安裝 Python。
 1. 視窗分成左右兩邊：左邊是 Windows（桌面、下載、文件、圖片與所有磁碟機），右邊是 Linux（在 Linux 中的隨身碟）。
    中間的分隔線可拖動；兩邊各有返回（←）、上一層（↑）、位址列與檢視（大圖示／清單／詳細資料，Ctrl＋滾輪縮放）。
 2. 在左邊按兩下隨身碟 → 確認「切換到 Linux」（Windows 看得到的隨身碟可選「否」改在 Windows 中開啟）。

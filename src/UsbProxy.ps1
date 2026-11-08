@@ -31,7 +31,8 @@ $script:linuxClip = $null
 $script:typeNames = @{}
 $actionNames = @{status='重新整理'; start='啟動 Linux'; shutdown='關閉 Linux'; attach='切換到 Linux'; eject='退出隨身碟'
     copy='複製到隨身碟'; transfer='隨身碟間傳輸'; download='複製到電腦'; list='讀取資料夾'; delete='刪除'; mkdir='新增資料夾'
-    rename='重新命名'; fetch='讀取檔案'}
+    rename='重新命名'; fetch='讀取檔案'; setup='安裝 Linux 環境'}
+$script:setupOffered = $false
 $quietActions = @('status','list')
 $uiFile = Join-Path $script:Runtime 'ui.json'
 $ui = @{zoom_win=0; zoom_lin=0; icon_win=2; icon_lin=2; width=1200; height=760; maximized=$false; split=0.5}
@@ -121,6 +122,7 @@ $bootProgress.Location = New-Object Drawing.Point(62,55); $bootProgress.Size = N
 $bootProgress.Visible = $false
 $linuxCard.Controls.Add($bootProgress)
 $linuxToggle = New-Button $linuxCard '啟動 Linux' 'Primary' ($innerWidth-14-128) 15 128 {
+    if ($script:vmState -eq 'notinstalled') {Start-Setup; return}
     if ($script:vmState -eq 'running') {
         if ($script:attached.Count) {
             $choice = [Windows.Forms.MessageBox]::Show('關閉 Linux 前會先安全退出所有隨身碟並交還 Windows。請確認沒有正在進行的複製。','關閉 Linux',[Windows.Forms.MessageBoxButtons]::OKCancel,[Windows.Forms.MessageBoxIcon]::Information)
@@ -359,6 +361,7 @@ function Show-LinComputer {
     }
     Set-Items $lin $items @('名稱','可用空間','類型','總大小') @(190,110,170,80) $false
     $message = if ($items.Count) {''}
+        elseif ($script:vmState -eq 'notinstalled') {"尚未安裝 Linux 環境`n`n按上方「安裝」開始（約 3～5 分鐘，不需要網路）"}
         elseif ($script:vmState -ne 'running') {"Linux 未啟動`n`n在左側按兩下隨身碟，即可切換到 Linux（會自動啟動）"}
         else {"沒有隨身碟在 Linux 中`n`n在左側按兩下隨身碟，即可切換到這裡"}
     Set-Empty $lin $message
@@ -448,7 +451,7 @@ function Update-Counts {
 function Update-State {
     $idle = -not $script:busy
     $running = $script:vmState -eq 'running'
-    $starting = $script:busy -and $script:pendingAction -eq 'start'
+    $starting = $script:busy -and $script:pendingAction -in 'start','setup'
     switch ($script:vmState) {
         'running' {
             if ($script:ready) {$linuxTitle.Text='Linux 已就緒'; $dot.BadgeColor=[UsbProxyUi.Theme]::Green}
@@ -457,9 +460,10 @@ function Update-State {
         'stopping' {$linuxTitle.Text='Linux 正在關機'; $dot.BadgeColor=[UsbProxyUi.Theme]::Orange}
         'poweroff' {$linuxTitle.Text='Linux 未啟動'; $dot.BadgeColor=[UsbProxyUi.Theme]::Gray}
         'unknown' {$linuxTitle.Text='正在連線 Linux…'; $dot.BadgeColor=[UsbProxyUi.Theme]::Gray}
+        'notinstalled' {$linuxTitle.Text='尚未安裝 Linux 環境'; $dot.BadgeColor=[UsbProxyUi.Theme]::Orange}
         default {$linuxTitle.Text='Linux 狀態：' + $script:vmState; $dot.BadgeColor=[UsbProxyUi.Theme]::Gray}
     }
-    if ($starting) {$linuxTitle.Text='Linux 啟動中'; $dot.BadgeColor=[UsbProxyUi.Theme]::Orange}
+    if ($starting) {$linuxTitle.Text = if ($script:pendingAction -eq 'setup') {'正在安裝 Linux 環境'} else {'Linux 啟動中'}; $dot.BadgeColor=[UsbProxyUi.Theme]::Orange}
     $dot.Dimmed = -not $running -and -not $starting
     if (-not $starting) {
         $count = $script:attached.Count
@@ -467,9 +471,11 @@ function Update-State {
             elseif ($count -eq 1) {('「{0}」在 Linux 中，Windows 暫時無法使用' -f $(if ($script:attached[0].name) {$script:attached[0].name} else {'隨身碟'}))}
             elseif ($running) {'在左側按兩下隨身碟，即可切換到 Linux 管理'}
             elseif ($script:vmState -eq 'poweroff') {'在左側按兩下隨身碟時會自動啟動'}
+            elseif ($script:vmState -eq 'notinstalled') {'首次使用：按「安裝」設定 VirtualBox 與 Linux（約 3～5 分鐘，可離線）'}
             else {$linuxDetail.Text}
     }
-    if ($running) {$linuxToggle.Text='關閉 Linux'; $linuxToggle.Kind='Secondary'}
+    if ($script:vmState -eq 'notinstalled') {$linuxToggle.Text='安裝'; $linuxToggle.Kind='Primary'}
+    elseif ($running) {$linuxToggle.Text='關閉 Linux'; $linuxToggle.Kind='Secondary'}
     else {$linuxToggle.Text='啟動 Linux'; $linuxToggle.Kind='Primary'}
     $linuxToggle.Enabled = $idle -and $script:vmState -ne 'stopping'
     foreach ($pane in $panes) {
@@ -480,8 +486,16 @@ function Update-State {
 }
 
 # --- Actions ---
+# First run: install VirtualBox (one administrator prompt), build Linux, then start it.
+function Start-Setup {
+    if ($script:busy) {return}
+    $text = '第一次使用需要安裝 VirtualBox 並建立 Linux 環境，約需 3～5 分鐘，不需要網路。' + "`n`n" + '安裝 VirtualBox 時 Windows 會詢問系統管理員權限，請按「是」。要現在安裝嗎？'
+    $choice = [Windows.Forms.MessageBox]::Show($text,'安裝 USB Proxy',[Windows.Forms.MessageBoxButtons]::OKCancel,[Windows.Forms.MessageBoxIcon]::Information)
+    if ($choice -eq [Windows.Forms.DialogResult]::OK) {Begin-Operation @{action='setup'}}
+}
 function Switch-ToLinux($Entry) {
     if ($script:busy -or -not $Entry) {return}
+    if ($script:vmState -eq 'notinstalled') {Start-Setup; return}
     $text = ('要將「{0}」切換到 Linux 嗎？' -f $Entry.Name) + "`n`n" + '切換後 Windows 會暫時無法使用這個隨身碟，請先關閉其中開啟的檔案。在右側按右鍵「退出」即可交還 Windows。'
     if ($script:vmState -ne 'running') {$text += "`n`n" + 'Linux 尚未啟動，會先自動啟動。'}
     if ($Entry.Kind -eq 'usb-drive') {
@@ -869,9 +883,9 @@ function Begin-Operation($Request) {
         $arguments = @('-NoProfile','-ExecutionPolicy','Bypass','-File',(Join-Path $script:Root 'scripts\Worker.ps1'),'-RequestFile',$script:requestPath,'-ResponseFile',$script:responsePath)
         $script:process = Start-Process 'powershell.exe' -ArgumentList (($arguments | ForEach-Object {Quote-Argument $_}) -join ' ') -WindowStyle Hidden -PassThru
         $script:opStarted = Get-Date
-        if ($Request.action -eq 'start') {
+        if ($Request.action -in 'start','setup') {
             $script:bootStarted = Get-Date; $script:bootPhase = ''
-            $script:bootEstimate = Get-BootEstimate
+            $script:bootEstimate = if ($Request.action -eq 'setup') {75} else {Get-BootEstimate}
             $bootProgress.Value = 0; $bootProgress.Visible = $true
         }
         if ($Request.action -in 'copy','fetch','transfer','download') {Start-TransferView $Request}
@@ -931,7 +945,8 @@ function Get-BootEstimate {
         $history = @((Read-Config).bootSeconds | Where-Object {$_})
         if ($history.Count) {return [Math]::Max(15,[int](($history | Measure-Object -Average).Average))}
     } catch { }
-    return 90
+    # The very first start installs packages offline and seals the image.
+    return 120
 }
 function Update-BootProgress {
     $progressFile = $script:responsePath + '.progress'
@@ -943,12 +958,14 @@ function Update-BootProgress {
             $script:bootPhase = $phase; $script:bootStarted = Get-Date
             if ($phase -eq 'retry') {Log-Line 'Linux 開機停滯，已自動重新啟動。'}
             if ($phase -eq 'updating') {$script:bootEstimate = [Math]::Max($script:bootEstimate,20); Log-Line '正在更新 Linux 內的元件。'}
+            if ($phase -eq 'virtualbox') {$script:bootEstimate = 75; Log-Line '正在安裝 VirtualBox（請在系統管理員提示按「是」）。'}
+            if ($phase -eq 'prepare') {$script:bootEstimate = 40; Log-Line '正在建立 Linux 虛擬機。'}
             if ($phase -eq 'sealing') {$script:bootEstimate = [Math]::Max($script:bootEstimate,40); Log-Line '正在保存乾淨的 Linux 映像（只需一次），之後每次啟動都從這個狀態開始。'}
         }
     }
     $elapsed = ((Get-Date) - $script:bootStarted).TotalSeconds
     $estimate = $script:bootEstimate
-    $prefix = switch ($script:bootPhase) { 'retry' {'重新啟動中'} 'updating' {'正在更新元件'} 'sealing' {'正在保存乾淨映像'} default {'正在啟動'} }
+    $prefix = switch ($script:bootPhase) { 'virtualbox' {'正在安裝 VirtualBox'} 'prepare' {'正在建立 Linux'} 'retry' {'重新啟動中'} 'updating' {'正在更新元件'} 'sealing' {'正在保存乾淨映像'} default {'正在啟動'} }
     if ($elapsed -lt $estimate) {
         $bootProgress.Value = [int](90 * $elapsed / $estimate)
         $linuxDetail.Text = ('{0}… 預估剩餘 {1}' -f $prefix,(Format-Duration ([int][Math]::Ceiling($estimate - $elapsed))))
@@ -985,7 +1002,7 @@ $timer.Add_Tick({
     }
     if (-not $script:process) {return}
     if (-not $script:process.HasExited) {
-        if ($script:pendingAction -eq 'start') {Update-BootProgress}
+        if ($script:pendingAction -in 'start','setup') {Update-BootProgress}
         if ($script:pendingAction -in 'copy','fetch','transfer','download') {Update-TransferView}
         return
     }
@@ -1015,6 +1032,13 @@ $timer.Add_Tick({
                 # A Linux folder whose volume disappeared falls back to the Linux root.
                 if ($lin.Location.kind -eq 'folder' -and -not @($script:volumes | Where-Object {$_.path -eq $lin.Location.device}).Count) {Reset-Lin}
                 elseif ($lin.Location.kind -eq 'pc') {Show-LinComputer}
+                # On a machine without the Linux environment, offer to install it once per session.
+                if ($script:vmState -eq 'notinstalled' -and -not $script:setupOffered) {$script:setupOffered = $true; $script:followUp = @{offerSetup=$true}}
+            }
+            'setup' {
+                Log-Line ('安裝完成，耗時 ' + (Format-Duration ([int]((Get-Date) - $script:opStarted).TotalSeconds)) + '。接著第一次啟動 Linux。')
+                $script:vmState = 'poweroff'
+                $script:followUp = @{action='start'}
             }
             'start' {
                 $script:vmState = 'running'; $script:ready = $true
@@ -1095,7 +1119,8 @@ $timer.Add_Tick({
     }
     if ($script:followUp) {
         $next = $script:followUp; $script:followUp = $null
-        if ($next.refreshWin) {if ($win.Location.kind -eq 'folder') {Navigate $win $win.Location -NoHistory}}
+        if ($next.offerSetup) {Start-Setup}
+        elseif ($next.refreshWin) {if ($win.Location.kind -eq 'folder') {Navigate $win $win.Location -NoHistory}}
         elseif ($next.nav) {
             if ($next.thenStatus) {$script:refreshWanted = $true; $script:lastDeviceChange = [datetime]::MinValue}
             if ($next.nav.kind -ne 'folder') {Show-LinComputer} elseif ($next.push) {Navigate $lin $next.nav} else {Navigate $lin $next.nav -NoHistory}

@@ -405,7 +405,37 @@ function Invoke-Eject($Config,[string]$Uuid) {
     }
 }
 
+function Test-Installed {
+    (Test-Path -LiteralPath (Join-Path $env:ProgramFiles 'Oracle\VirtualBox\VBoxManage.exe')) -and (Test-Path -LiteralPath $script:ConfigFile)
+}
+
+# First run from Start-USBProxy.cmd: install VirtualBox (UAC prompt) and build the Linux VM.
+function Invoke-Setup {
+    foreach ($name in 'VirtualBox-7.2.22-175245-Win.exe','debian-13-generic-amd64.tar.xz') {
+        if (-not (Test-Path -LiteralPath (Join-Path $script:Root ('downloads\' + $name)))) { throw "找不到安裝檔 downloads\$name。請使用完整的部署包。" }
+    }
+    if (-not (Test-Path -LiteralPath (Join-Path $env:ProgramFiles 'Oracle\VirtualBox\VBoxManage.exe'))) {
+        Write-Progress-File 'virtualbox'
+        try {
+            $null = Invoke-Native 'powershell.exe' @('-NoProfile','-ExecutionPolicy','Bypass','-File',(Join-Path $PSScriptRoot 'Install-Host.ps1')) -TimeoutSeconds 1800
+        } catch {
+            if ($_.Exception.Message -match 'cancel|取消') { throw '需要系統管理員權限才能安裝 VirtualBox。請再按一次「安裝」，並在提示中按「是」。' }
+            throw
+        }
+    }
+    if (-not (Test-Path -LiteralPath $script:ConfigFile)) {
+        Write-Progress-File 'prepare'
+        $null = Invoke-Native 'powershell.exe' @('-NoProfile','-ExecutionPolicy','Bypass','-File',(Join-Path $PSScriptRoot 'Prepare-VM.ps1')) -TimeoutSeconds 1800
+    }
+    return @{installed=$true}
+}
+
 function Invoke-Operation($request) {
+    if ($request.action -eq 'setup') { return Invoke-Setup }
+    if (-not (Test-Installed)) {
+        if ($request.action -eq 'status') { return @{installed=$false; vm=@{state='notinstalled'; attached=@()}; guest=$null; message=''; usb=@()} }
+        throw '尚未安裝 Linux 環境，請先按「安裝」。'
+    }
     $config = Read-Config
     switch ($request.action) {
         'status' {

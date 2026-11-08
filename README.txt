@@ -1,7 +1,7 @@
 USB Proxy prototype
 ===================
 
-Setup: run Setup-USBProxy.cmd once. Approve the Windows UAC prompt for
+Setup: just run Start-USBProxy.cmd; on first use it offers to install (or run Setup-USBProxy.cmd). Approve the Windows UAC prompt for
 Oracle VirtualBox. Only VBoxApplication and VBoxUSB are installed.
 For another PC, use the clean folder under dist/, not a copy of runtime/.
 Start: run Start-USBProxy.cmd. The window opens on "This PC": double-click a USB drive and confirm to switch it to Linux (Linux starts automatically). The drive then opens in an Explorer-like browser (icons/list/details views): drag files in to copy with SHA-256 verification and progress/ETA, open and edit files (offered back to the drive on save), rename, delete, new folder. Eject returns the drive to Windows; shutting down Linux ejects first.
