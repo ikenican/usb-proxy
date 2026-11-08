@@ -1,0 +1,16 @@
+# Machine-specific state: VM disk, SSH private key, config. Never commit.
+runtime/
+# Local registry/driver snapshots and logs (contain device serials and machine details).
+backups/
+logs/
+# Built packages (published as GitHub release assets instead).
+dist/
+# Large third-party installers; only the checksum files are tracked.
+downloads/*
+!downloads/virtualbox-SHA256SUMS
+!downloads/debian-SHA512SUMS
+# Third-party portable bundle supplied separately; not used by the app.
+VirtualBoxPortable64/
+# Local editor/workbench settings.
+.workbench/
+*.zip

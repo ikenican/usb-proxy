@@ -1,0 +1,3 @@
+# Store files byte-for-byte: the guest agent must keep LF endings (shebang, hash checks)
+# and PowerShell scripts keep their UTF-8 BOM.
+* -text

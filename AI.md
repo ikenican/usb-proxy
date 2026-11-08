@@ -1,0 +1,69 @@
+# AI.md — handoff notes for agents working on USB Proxy
+
+Read this before changing anything. The user writes Traditional Chinese (zh-TW); answer in zh-TW. All user-facing UI text is zh-TW.
+
+## What this is
+
+A Windows app that manages USB flash drives through an isolated Linux VM. Windows never mounts the drive: the VM captures it (VirtualBox USB passthrough), mounts it, and does every read/write, verified with SHA-256. The UI imitates Windows "This PC" + File Explorer.
+
+Target: Windows 10/11 x64 without dev tools. Everything runs on built-in Windows PowerShell 5.1 + .NET Framework 4.8 + OpenSSH client. No Python/Visual Studio on the host.
+
+## Layout
+
+| Path | Role |
+|---|---|
+| `Start-USBProxy.cmd` | Launches `src/UsbProxy.ps1` (hidden console, STA). |
+| `Setup-USBProxy.cmd` | `scripts/Install-Host.ps1` (elevated; installs signed VirtualBox 7.2.22: app + USB only) then `scripts/Prepare-VM.ps1`. |
+| `src/UsbProxy.ps1` | WinForms UI. Runs each operation via `Begin-Operation` → spawns `scripts/Worker.ps1` in its own process; a 250 ms timer polls for the response. |
+| `src/AppleUi.cs` | Custom controls compiled at startup with `Add-Type` (**C# 5 only, ASCII only** — csc reads the file in the system code page). Theme, Card, PillButton, PopupSelect, ThinProgress, PenguinBadge, MenuRenderer, FileEntry, ShellIcons (Windows shell icons/type names), ExplorerListView (Explorer theme, natural sort, Ctrl+wheel event, icon spacing), DeviceChangeWatcher (WM_DEVICECHANGE). |
+| `src/app.ico`, `src/penguin.png` | Window icon; Linux badge drawn on drives. Generated from `linxupenguin.png`. Use the PNG for drawing: .NET cannot decode PNG-compressed ICO frames. |
+| `scripts/Worker.ps1` | One request per process: `status, start, shutdown, attach, eject, list, delete, mkdir, rename, copy, fetch`. Reads `-RequestFile`, writes `-ResponseFile` `{ok,data|error}`. Holds `runtime/operation.lock`. Writes progress to `<ResponseFile>.progress`. |
+| `scripts/Common.ps1` | Paths, `Invoke-Native` (with `-Poll` callback), `Invoke-Guest` (ssh → `sudo -n /usr/local/sbin/usbproxy-agent`, JSON on stdin), config helpers. |
+| `guest/usbproxy-agent.py` | Privileged guest agent (runs as root via a single sudoers entry). Only mounts partitions whose block-device ancestry has `TRAN=usb`, at `/mnt/usbproxy`. Paths are volume-relative and never follow symlinks (`resolve()`). |
+| `guest/test_agent.py` | Unit tests, run inside the VM (see Testing). |
+| `scripts/New-GuestSeed.ps1` | cloud-init NoCloud seed ISO (user, key, packages, agent via `write_files`). |
+| `scripts/Build-Package.ps1` | Builds `dist/USBProxy-<timestamp>` (scripts, src, guest, docs, the two installers + checksums, manifest). |
+| `scripts/Test-Integration.ps1`, `New-ValidationDisk.ps1`, `Test-PhysicalUsb.ps1`, `Verify-Project.ps1` | Older validation scripts (emulated FAT32 USB disk; physical drive). Still compatible with the worker. |
+| `runtime/` | **Per machine, never commit**: `config.json`, `id_ed25519` (private key), VM, `jobs/`, `open/` (local copies of opened files), `ui.json` (view/zoom/window size). |
+| `downloads/` | `VirtualBox-7.2.22-175245-Win.exe`, `debian-13-generic-amd64.tar.xz` (not in git; in the release zip) + tracked checksum files. |
+
+## Key flows
+
+- **Switch to Linux**: double-click a drive in 本機 → confirm → `start` if needed → `status` → `attach` (VBoxManage `usbattach` of that UUID only; never wildcard filters) → worker waits up to 20 s for partitions → UI opens the single partition or shows 本機.
+- **Copy (upload)**: worker builds a plan, streams a tar (`file-NNNNNNNN` blobs + `manifest.json`) over ssh stdin into `/home/usbproxy/incoming/<job>`, hashing on the fly; then agent `copy` writes each file to a `.usbproxy-*` temp, checks the staged hash while writing, fsyncs, reads it back (SHA-256), and `os.replace`s it. Existing names are refused unless `overwrite` (edit write-back, regular files only). Progress units = 3 × bytes (upload 1×, write + read-back 2×); the agent writes `<spool>/.progress`, which the worker polls over ssh once a second.
+- **Open / save (download)**: agent `stream` writes raw bytes to stdout and the JSON result (size, sha256) to **stderr**; the worker hashes while receiving into `runtime/open/<guid>/<name>` and verifies. The UI watches opened files and offers write-back when the timestamp changes and is stable.
+- **Start**: boot with serial console logged to `logs/vm-serial.log`. If the console stops growing for 90 s (240 s on first boot) the VM is power-cycled once. Boot durations go to `config.bootSeconds` and drive the UI's ETA. After ready, `Sync-GuestAgent` compares the agent hash; it uses `self-update` (new agents) or re-seeds cloud-init (agents older than self-update). `status` also self-updates a running guest (no reseed).
+- **Shutdown**: auto-eject (unmount + `usbdetach`), agent schedules `shutdown -h +1`, then ACPI power button; worker waits until `poweroff` (≈5 s).
+
+## Hard-won lessons (do not regress)
+
+1. **VM must have 1 vCPU.** With Hyper-V present, VirtualBox runs via NEM; 2 vCPUs made Debian boots stall intermittently (3 of 4 boots, up to 8+ min). 1 vCPU: 25 s every time. `Start-GuestVm` enforces `--cpus 1`.
+2. **No BOM on ssh stdin.** Child-process stdin uses `Console.InputEncoding`; a UTF-8 console prefixes a BOM and the agent's `json.load` rejects it. `Common.ps1` sets `[Console]::InputEncoding` to BOM-less UTF-8.
+3. **PowerShell 5.1 needs UTF-8 *with BOM*** for any `.ps1` containing Chinese, including your own test scripts (otherwise strings are garbled and the agent rightly rejects names). Keep `AppleUi.cs` ASCII (use `(char)0x00B7` etc.).
+4. PS 5.1 has no `try` as an expression, no `??`, no `?.`; `@($null).Count` is 1 — filter with `Where-Object {$_}`.
+5. WinForms anchoring: size a docked panel **before** adding anchored children, or they overflow. ListView column widths and ImageList sizes are not auto-scaled — multiply by `$scale` (DeviceDpi/96). ImageList images max 256 px.
+6. Large-icon view needs `LVM_SETICONSPACING` (ExplorerListView.SetIconSpacing) or big icons overlap.
+7. Jumbo shell icons for types without 256 px art sit in a corner; `ShellIcons.Render` falls back to the 48 px list.
+8. Don't use `.GetNewClosure()` for the worker's poll callback — it hides script-scope functions. Plain scriptblocks see the caller's variables via dynamic scope.
+9. When testing worker flows, run each request in a **separate `powershell.exe`** like the UI does; dot-sourcing/`&`-calling Worker.ps1 in one session pollutes `$script:` state.
+
+## Testing
+
+- UI smoke test (renders `logs/ui-preview.png`): `powershell -STA -File src\UsbProxy.ps1 -SmokeTest`
+- Parse check: `[Management.Automation.Language.Parser]::ParseFile(...)` on every `.ps1`.
+- Guest unit tests (VM running): scp `guest/test_agent.py` to `/home/usbproxy/` and run `python3 /home/usbproxy/test_agent.py` (tests import the *installed* agent, so start Linux first to sync it). Currently 14 tests, all passing.
+- End-to-end without a physical drive: attach `runtime/validation/fat32.vdi` (created by `New-ValidationDisk.ps1`) to a `ValidationUSB` storage controller while the VM is off; it appears as a USB FAT32 volume in the guest. Detach it afterwards. Never format or write raw to a real device.
+- Physical drive: capturing takes it away from Windows — ask the user first.
+
+## Releasing
+
+1. `scripts/Build-Package.ps1` → `dist/USBProxy-<timestamp>` (requires the two installers in `downloads/`; get them from the latest release zip).
+2. Keep only the newest folder in `dist/` (user preference).
+3. Zip it as `USBProxy-<version>-full.zip` and attach it to a GitHub release.
+
+## Status / open items
+
+- Verified: emulated FAT32 USB end-to-end (copy with progress, stream download, write-back, save, rename, delete, duplicate refusal); physical SanDisk exFAT capture/copy/release (earlier version); live UI startup listing the real drive.
+- Not yet verified: full new UI flow on a physical drive; NTFS writes; other device models; target machines with USBSTOR disabled; real Explorer drag-and-drop and Ctrl+wheel by hand (simulated only).
+- Ideas not done: drag files *out* to Explorer, cancel button for transfers, sort arrows in the column header, multiple drives in Linux at once (worker allows one).
+- The repo is private and has no license yet.
