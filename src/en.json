@@ -204,5 +204,9 @@
  "記住的隨身碟（插上就直接進 Linux；按「退出」會忘記該支）": "Remembered drives (go straight to Linux when plugged in; Eject forgets a drive)",
  "（尚無，切換到 Linux 一次就會記住）": "(none yet; a drive is remembered after it is switched to Linux once)",
  "移除": "Remove",
- "目前有工作進行中，請稍後再移除。": "A task is running. Remove the drive later."
+ "目前有工作進行中，請稍後再移除。": "A task is running. Remove the drive later.",
+ "切換成白天": "Switch to light mode",
+ "切換成黑夜": "Switch to dark mode",
+ "關閉視窗時隨身碟留在 Linux（不退出，下次開啟直接使用）": "Keep drives in Linux when the window closes (no eject; ready next time)",
+ "目前有工作進行中，完成後再切換。": "A task is running. Switch after it finishes."
 }

@@ -815,7 +815,7 @@ namespace UsbProxy
                     e.Cancel = true; MessageBox.Show(T("正在處理隨身碟上的檔案，請等待完成再關閉，以免資料損壞。"), "USB Proxy"); return;
                 }
             }
-            if (attached.Count > 0)
+            if (attached.Count > 0 && !relaunch && !UiB("keepOnClose"))
             {
                 e.Cancel = true;
                 if (MessageBox.Show(T("仍有隨身碟在 Linux 中。要安全退出、關閉 Linux 後再結束嗎？"), "USB Proxy", MessageBoxButtons.OKCancel, MessageBoxIcon.Question) == DialogResult.OK)

@@ -134,7 +134,7 @@ namespace UsbProxy
         int bootEstimate;
         DateTime? winAwaySince;
         Map ui = J.Obj("zoom_win", 0, "zoom_lin", 0, "icon_win", 2, "icon_lin", 2, "width", 1200, "height", 760, "maximized", false,
-            "split", 0.5, "pin_win", true, "lang", "zh", "theme", "light", "cpus", 1, "memory", 1024, "autoLinux", true, "autoUpdate", true);
+            "split", 0.5, "pin_win", true, "lang", "zh", "theme", "light", "cpus", 1, "memory", 1024, "autoLinux", true, "autoUpdate", true, "keepOnClose", true);
         int UiI(string k) { return J.I(ui, k); }
         bool UiB(string k) { return J.B(ui, k); }
         void SaveUi() { try { Core.WriteUtf8(Core.UiFile, J.Write(ui)); } catch { } }
@@ -270,12 +270,16 @@ namespace UsbProxy
             transferGap = NewSpacer(DockStyle.Bottom, 10); transferGap.Visible = false;
 
             statusBar = new Panel { Size = new Size(innerWidth, 30), BackColor = form.BackColor };
-            statusText = NewText(statusBar, "", 2, 6, innerWidth - 330, 22, captionFont, Theme.SecondaryLabel, TLR);
+            statusText = NewText(statusBar, "", 2, 6, innerWidth - 250, 22, captionFont, Theme.SecondaryLabel, TLR);
             NewButton(statusBar, T("活動記錄"), ButtonKind.Plain, innerWidth - 96, 1, 96, () => { logWindow.Show(); logWindow.Activate(); }, 28, TR);
-            // Language / theme: saved to ui.json, applied by reopening the window.
-            NewButton(statusBar, J.S(ui, "lang") == "en" ? "中文" : "English", ButtonKind.Plain, innerWidth - 96 - 96, 1, 92, () => SetPreference("lang", J.S(ui, "lang") == "en" ? "zh" : "en"), 28, TR);
-            NewButton(statusBar, J.S(ui, "theme") == "dark" ? T("白天") : T("黑夜"), ButtonKind.Plain, innerWidth - 96 - 96 - 64, 1, 60, () => SetPreference("theme", J.S(ui, "theme") == "dark" ? "light" : "dark"), 28, TR);
-            NewButton(statusBar, T("設定"), ButtonKind.Plain, innerWidth - 96 - 96 - 64 - 64, 1, 60, ShowSettings, 28, TR);
+            // Language / theme icons: saved to ui.json and applied by reopening the window at once (drives stay in Linux).
+            var iconFont = new Font("Segoe MDL2 Assets", 11);
+            var tips = new ToolTip();
+            var langButton = NewButton(statusBar, "", ButtonKind.Plain, innerWidth - 96 - 40, 1, 36, () => SetPreference("lang", J.S(ui, "lang") == "en" ? "zh" : "en"), 28, TR);
+            langButton.Font = iconFont; tips.SetToolTip(langButton, J.S(ui, "lang") == "en" ? "切換成中文" : "Switch to English");
+            var themeButton = NewButton(statusBar, J.S(ui, "theme") == "dark" ? "" : "", ButtonKind.Plain, innerWidth - 96 - 80, 1, 36, () => SetPreference("theme", J.S(ui, "theme") == "dark" ? "light" : "dark"), 28, TR);
+            themeButton.Font = iconFont; tips.SetToolTip(themeButton, J.S(ui, "theme") == "dark" ? T("切換成白天") : T("切換成黑夜"));
+            NewButton(statusBar, T("設定"), ButtonKind.Plain, innerWidth - 96 - 80 - 64, 1, 60, ShowSettings, 28, TR);
             statusBar.Dock = DockStyle.Bottom;
 
             linuxCard = new Card { Size = new Size(innerWidth, 64) };
@@ -422,7 +426,7 @@ namespace UsbProxy
                 Text = T("設定"), FormBorderStyle = FormBorderStyle.FixedDialog, MaximizeBox = false, MinimizeBox = false,
                 StartPosition = FormStartPosition.CenterParent, ShowInTaskbar = false, Font = bodyFont,
                 AutoScaleDimensions = new SizeF(96, 96), AutoScaleMode = AutoScaleMode.Dpi,
-                BackColor = Theme.Background, ForeColor = Theme.Label, ClientSize = new Size(420, 512)
+                BackColor = Theme.Background, ForeColor = Theme.Label, ClientSize = new Size(420, 544)
             })
             {
                 NewText(dialog, T("Linux 虛擬機"), 20, 14, 380, 24, headlineFont);
@@ -437,14 +441,16 @@ namespace UsbProxy
                 NewText(dialog, T("下次啟動 Linux 時套用。這台電腦開著 Hyper-V，CPU 多於 1 顆時偶爾會開機卡住（程式會自動重試一次）；卡住請改回 1。"), 20, 124, 380, 52, captionFont, Theme.SecondaryLabel);
                 var autoBox = new CheckBox { Text = T("插入隨身碟時自動切換到 Linux"), Checked = UiB("autoLinux"), Location = new Point(20, 184), Size = new Size(380, 26) };
                 dialog.Controls.Add(autoBox);
-                NewText(dialog, T("記住的隨身碟（插上就直接進 Linux；按「退出」會忘記該支）"), 20, 214, 380, 22, captionFont, Theme.SecondaryLabel);
-                var keepList = new ListBox { Location = new Point(20, 238), Size = new Size(280, 84), IntegralHeight = false };
+                var keepOpenBox = new CheckBox { Text = T("關閉視窗時隨身碟留在 Linux（不退出，下次開啟直接使用）"), Checked = UiB("keepOnClose"), Location = new Point(20, 212), Size = new Size(390, 26) };
+                dialog.Controls.Add(keepOpenBox);
+                NewText(dialog, T("記住的隨身碟（插上就直接進 Linux；按「退出」會忘記該支）"), 20, 246, 380, 22, captionFont, Theme.SecondaryLabel);
+                var keepList = new ListBox { Location = new Point(20, 270), Size = new Size(280, 84), IntegralHeight = false };
                 foreach (var d in remembered) keepList.Items.Add((J.S(d, "name") != "" ? J.S(d, "name") + "  " : "") + "(" + J.S(d, "serial") + ")");
                 if (remembered.Count == 0) { keepList.Items.Add(T("（尚無，切換到 Linux 一次就會記住）")); keepList.Enabled = false; }
                 dialog.Controls.Add(keepList);
                 var forgetSerials = new List<string>();
                 var shown = remembered.Select(d => J.S(d, "serial")).ToList();
-                var forgetButton = new Button { Text = T("移除"), Location = new Point(316, 238), Size = new Size(90, 30), Enabled = remembered.Count > 0 };
+                var forgetButton = new Button { Text = T("移除"), Location = new Point(316, 270), Size = new Size(90, 30), Enabled = remembered.Count > 0 };
                 forgetButton.Click += (s, e) =>
                 {
                     int i = keepList.SelectedIndex;
@@ -452,18 +458,18 @@ namespace UsbProxy
                     forgetSerials.Add(shown[i]); shown.RemoveAt(i); keepList.Items.RemoveAt(i);
                 };
                 dialog.Controls.Add(forgetButton);
-                var updateBox = new CheckBox { Text = T("開啟時自動檢查更新"), Checked = UiB("autoUpdate"), Location = new Point(20, 362), Size = new Size(380, 26) };
+                var updateBox = new CheckBox { Text = T("開啟時自動檢查更新"), Checked = UiB("autoUpdate"), Location = new Point(20, 394), Size = new Size(380, 26) };
                 dialog.Controls.Add(updateBox);
-                NewText(dialog, T("目前版本") + " " + Updater.Current, 20, 402, 200, 24, captionFont, Theme.SecondaryLabel);
-                var checkNow = new Button { Text = T("檢查更新"), Location = new Point(220, 398), Size = new Size(186, 30) };
+                NewText(dialog, T("目前版本") + " " + Updater.Current, 20, 434, 200, 24, captionFont, Theme.SecondaryLabel);
+                var checkNow = new Button { Text = T("檢查更新"), Location = new Point(220, 430), Size = new Size(186, 30) };
                 checkNow.Click += (s, e) => { dialog.Close(); CheckUpdate(true); };
                 dialog.Controls.Add(checkNow);
-                var ok = new Button { Text = T("確定"), DialogResult = DialogResult.OK, Location = new Point(220, 466), Size = new Size(90, 30) };
-                var cancel = new Button { Text = T("取消"), DialogResult = DialogResult.Cancel, Location = new Point(316, 466), Size = new Size(90, 30) };
+                var ok = new Button { Text = T("確定"), DialogResult = DialogResult.OK, Location = new Point(220, 498), Size = new Size(90, 30) };
+                var cancel = new Button { Text = T("取消"), DialogResult = DialogResult.Cancel, Location = new Point(316, 498), Size = new Size(90, 30) };
                 dialog.Controls.Add(ok); dialog.Controls.Add(cancel); dialog.AcceptButton = ok; dialog.CancelButton = cancel;
                 if (dialog.ShowDialog(form) != DialogResult.OK) return;
                 changed = (int)cpuBox.Value != UiI("cpus") || (int)memBox.Value != UiI("memory");
-                ui["cpus"] = (int)cpuBox.Value; ui["memory"] = (int)memBox.Value; ui["autoLinux"] = autoBox.Checked; ui["autoUpdate"] = updateBox.Checked;
+                ui["cpus"] = (int)cpuBox.Value; ui["memory"] = (int)memBox.Value; ui["autoLinux"] = autoBox.Checked; ui["autoUpdate"] = updateBox.Checked; ui["keepOnClose"] = keepOpenBox.Checked;
                 if (autoBox.Checked) { autoSkip.Clear(); refreshWanted = true; }
                 else if (remembered.Count > 0) refreshWanted = true;   // the next status forgets every remembered drive
                 if (forgetSerials.Count > 0)
@@ -524,13 +530,10 @@ namespace UsbProxy
         }
         void SetPreference(string key, string value)
         {
+            // Colors and texts are fixed when the window is built, so the window reopens (about a second).
+            // Drives in Linux stay there; only a running copy or transfer has to finish first.
+            if (busy) { MessageBox.Show(T("目前有工作進行中，完成後再切換。"), "USB Proxy"); return; }
             ui[key] = value;
-            if (busy || attached.Count > 0)
-            {
-                SaveUi();
-                MessageBox.Show(T("目前有工作進行中或隨身碟在 Linux 中，設定已儲存，將於下次開啟時套用。"), "USB Proxy");
-                return;
-            }
             relaunch = true; form.Close();
         }
 
