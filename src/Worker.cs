@@ -140,7 +140,9 @@ namespace UsbProxy
                 var s = Regex.Match(block, "(?m)^SerialNumber:[ \\t]*(.+)$");
                 var name = new[] { "Manufacturer", "Product" }.Select(f => Regex.Match(block, "(?m)^" + f + ":[ \\t]*(.+)$"))
                     .Where(m => m.Success).Select(m => m.Groups[1].Value.Trim());
-                list.Add(J.Obj("uuid", u.Groups[1].Value, "serial", s.Success ? s.Groups[1].Value.Trim() : "", "name", string.Join(" ", name)));
+                Func<string, string> field = f => { var m = Regex.Match(block, "(?m)^" + f + ":[ \\t]*(.+)$"); return m.Success ? m.Groups[1].Value.Trim() : ""; };
+                list.Add(J.Obj("uuid", u.Groups[1].Value, "serial", s.Success ? s.Groups[1].Value.Trim() : "", "name", string.Join(" ", name),
+                    "VendorId", field("VendorId"), "ProductId", field("ProductId")));
             }
             return list;
         }
@@ -162,7 +164,7 @@ namespace UsbProxy
 
         // Capture of an already-plugged drive is unreliable on some machines, while capture at insertion works:
         // a drive the user replugged arrives in the VM by itself. Make the recorded list match the VM.
-        static void SyncAttached(Map config, Map guest)
+        static void SyncAttached(Map config, Map guest, bool remember)
         {
             var inVm = VmUsb(config);
             var known = Attached(config);
@@ -186,32 +188,63 @@ namespace UsbProxy
             // A drive that arrived no longer needs its capture-on-insert filter.
             var arrived = inVm.Select(x => J.S(x, "serial") != "" ? J.S(x, "serial") : "any").ToList();
             if (arrived.Count > 0) RemovePendingFilters(config, arrived);
+            // Every drive that made it into Linux goes straight there next time it is plugged in.
+            if (remember) foreach (var d in inVm) Remember(config, J.S(d, "VendorId"), J.S(d, "ProductId"), J.S(d, "serial"), J.S(d, "name"));
         }
 
-        // A VM filter "usbproxy-pending-*" captures one specific drive when it is plugged in again.
-        static List<KeyValuePair<int, string>> PendingFilters(Map config)
+        // VM filters capture one specific drive (vendor + product + serial) the moment it is plugged in, without
+        // Windows or this program in between. "usbproxy-pending-*": one-shot, for a stuck drive the user replugs.
+        // "usbproxy-keep-*": a remembered drive that goes straight to Linux every time (also at Linux start).
+        const string Pending = "usbproxy-pending-", Keep = "usbproxy-keep-";
+        static List<KeyValuePair<int, string>> Filters(Map config, string prefix)
         {
             string raw = VBox("showvminfo", J.S(config, "vmName"), "--machinereadable");
-            return Regex.Matches(raw, "(?m)^USBFilterName(\\d+)=\"(usbproxy-pending-[^\"]*)\"").Cast<Match>()
+            return Regex.Matches(raw, "(?m)^USBFilterName(\\d+)=\"(" + Regex.Escape(prefix) + "[^\"]*)\"").Cast<Match>()
                 .Select(m => new KeyValuePair<int, string>(int.Parse(m.Groups[1].Value) - 1, m.Groups[2].Value)).ToList();
         }
-        static void AddPendingFilter(Map config, Map device)
+        static void AddFilter(Map config, string prefix, string vendorId, string productId, string serial)
         {
-            string serial = J.S(device, "SerialNumber");
-            if (serial == "") return;   // never arm a filter that would grab every drive of this model
-            string name = "usbproxy-pending-" + serial;
-            if (PendingFilters(config).Any(f => f.Value == name)) return;
+            if (serial == "" || HexId(vendorId) == "" || HexId(productId) == "") return;   // never arm a filter that would grab every drive of this model
+            string name = prefix + serial;
+            if (Filters(config, prefix).Any(f => f.Value == name)) return;
             VBox("usbfilter", "add", "0", "--target", J.S(config, "vmName"), "--name", name,
-                "--vendorid", HexId(J.S(device, "VendorId")), "--productid", HexId(J.S(device, "ProductId")), "--active", "yes", "--serialnumber", serial);
+                "--vendorid", HexId(vendorId), "--productid", HexId(productId), "--active", "yes", "--serialnumber", serial);
         }
-        static void RemovePendingFilters(Map config, List<string> serials = null)
+        static void RemoveFilters(Map config, string prefix, List<string> serials = null)
         {
             // Highest index first, so the remaining indexes stay valid.
-            foreach (var f in PendingFilters(config).OrderByDescending(f => f.Key))
+            foreach (var f in Filters(config, prefix).OrderByDescending(f => f.Key))
             {
-                if (serials != null && !serials.Any(s => f.Value == "usbproxy-pending-" + s)) continue;
+                if (serials != null && !serials.Any(s => f.Value == prefix + s)) continue;
                 try { VBox("usbfilter", "remove", f.Key.ToString(CultureInfo.InvariantCulture), "--target", J.S(config, "vmName")); } catch { }
             }
+        }
+        static void AddPendingFilter(Map config, Map device) { AddFilter(config, Pending, J.S(device, "VendorId"), J.S(device, "ProductId"), J.S(device, "SerialNumber")); }
+        static void RemovePendingFilters(Map config, List<string> serials = null) { RemoveFilters(config, Pending, serials); }
+
+        // Remembered drives: [{serial, name}] for the settings list; the keep filters themselves live in the VM.
+        static List<Map> Remembered(Map config)
+        {
+            var names = J.M(config, "rememberedNames") ?? new Map();
+            return Filters(config, Keep).Select(f => f.Value.Substring(Keep.Length))
+                .Select(s => J.Obj("serial", s, "name", J.S(names, s))).ToList();
+        }
+        static void Remember(Map config, string vendorId, string productId, string serial, string name)
+        {
+            AddFilter(config, Keep, vendorId, productId, serial);
+            if (serial == "") return;
+            var names = J.M(config, "rememberedNames") ?? new Map();
+            if (J.S(names, serial) == name || name == "") return;
+            names[serial] = name; config["rememberedNames"] = names;
+            Core.SaveConfig(config);
+        }
+        static void Forget(Map config, List<string> serials)
+        {
+            RemoveFilters(config, Keep, serials);
+            var names = J.M(config, "rememberedNames");
+            if (names == null) return;
+            foreach (string s in serials == null ? names.Keys.ToList() : serials) names.Remove(s);
+            Core.SaveConfig(config);
         }
 
         [DllImport("cfgmgr32.dll", CharSet = CharSet.Unicode)]
@@ -607,13 +640,16 @@ namespace UsbProxy
         }
 
         // Unmounts a drive's partitions in the guest, then hands the device back to Windows.
-        static void Eject(Map config, string uuid)
+        static void Eject(Map config, string uuid, bool forget)
         {
             bool running = State(config) == "running";
             foreach (var drive in Attached(config).Where(d => uuid == "" || J.S(d, "uuid") == uuid).ToList())
             {
                 // Without a known serial the guest unmounts everything; other drives remount on next use.
                 if (running) Core.Guest(config, J.Obj("action", "eject", "serial", J.S(drive, "serial")));
+                // Given back to Windows on purpose: forget it before releasing it, so VirtualBox does not grab it again.
+                var vmDrive = VmUsb(config).FirstOrDefault(d => J.S(d, "uuid") == J.S(drive, "uuid"));
+                if (forget && vmDrive != null && J.S(vmDrive, "serial") != "") try { Forget(config, new List<string> { J.S(vmDrive, "serial") }); } catch { }
                 try { VBox("controlvm", J.S(config, "vmName"), "usbdetach", J.S(drive, "uuid")); }
                 catch
                 {
@@ -645,7 +681,7 @@ namespace UsbProxy
             ProtectSshKey();
             switch (action)
             {
-                case "status": return Status(config);
+                case "status": return Status(config, request);
                 case "start": return Start(config, request);
                 case "attach": return Attach(config, request);
                 case "copy": return Copy(config, request);
@@ -660,14 +696,17 @@ namespace UsbProxy
                 case "fetch": return Fetch(config, request);
                 case "transfer": return Transfer(config, request);
                 case "download": return Download(config, request);
-                case "eject": Eject(config, J.S(request, "uuid")); return J.Obj("ejected", true);
+                case "eject": Eject(config, J.S(request, "uuid"), true); return J.Obj("ejected", true);
+                case "forget": Forget(config, J.Strings(request, "serials")); return J.Obj("remembered", Remembered(config).ToArray());
                 case "shutdown": return Shutdown(config);
                 default: throw new ToolException("Unknown operation.");
             }
         }
 
-        static Map Status(Map config)
+        static Map Status(Map config, Map request)
         {
+            // "remember" follows the auto-switch setting (absent = on); turning it off forgets every drive.
+            bool remember = J.Get(request, "remember") == null || J.B(request, "remember");
             Map guest = null;
             string message = "";
             Map info;
@@ -683,7 +722,7 @@ namespace UsbProxy
                 try
                 {
                     var before = Attached(config).Select(d => J.S(d, "uuid")).ToList();
-                    SyncAttached(config, guest);
+                    SyncAttached(config, guest, remember);
                     // A drive that just arrived needs a few seconds before Linux shows its partitions.
                     if (guest != null && Attached(config).Any(d => !before.Contains(J.S(d, "uuid"))))
                     {
@@ -695,7 +734,7 @@ namespace UsbProxy
                             try { guest = GuestStatus(config); } catch { continue; }
                             if (J.Maps(guest, "volumes").Count > count) break;
                         }
-                        SyncAttached(config, guest);
+                        SyncAttached(config, guest, remember);
                     }
                     info["attached"] = Attached(config).ToArray();
                 }
@@ -718,7 +757,14 @@ namespace UsbProxy
                 d["drives"] = serial != "" && letters.ContainsKey(serial) ? letters[serial].ToArray() : new string[0];
                 usb.Add(d);
             }
-            return J.Obj("vm", info, "guest", guest, "message", message, "usb", usb.ToArray());
+            var remembered = new List<Map>();
+            try
+            {
+                if (!remember) Forget(config, null);
+                remembered = Remembered(config);
+            }
+            catch { }
+            return J.Obj("vm", info, "guest", guest, "message", message, "usb", usb.ToArray(), "remembered", remembered.ToArray());
         }
 
         static Map Start(Map config, Map request)
@@ -736,7 +782,7 @@ namespace UsbProxy
                 if (J.I(request, "cpus") >= 1) config["vmCpus"] = J.I(request, "cpus");
                 if (J.I(request, "memory") >= 512) config["vmMemory"] = J.I(request, "memory");
                 SetAttached(config, new List<Map>());   // drives cannot still be in a VM that was not running
-                RemovePendingFilters(config);            // a cold boot must not grab drives on its own
+                RemovePendingFilters(config);            // one-shot filters do not outlive a boot; remembered drives are grabbed at boot
                 config["shutdownRequestedAt"] = null;
                 Core.SaveConfig(config);
                 StartGuestVm(config);
@@ -849,6 +895,8 @@ namespace UsbProxy
                 StartRecordCleanup(device[0]);
                 throw new ToolException(replug);
             }
+            if (J.Get(request, "remember") == null || J.B(request, "remember"))
+                try { Remember(config, J.S(device[0], "VendorId"), J.S(device[0], "ProductId"), J.S(device[0], "SerialNumber").Trim(), J.S(request, "name")); } catch { }
             // Remember the serial Linux reports, which can differ in format from VirtualBox's.
             var reported = fresh.Select(v => J.S(v, "serial")).Where(s => s != "").Distinct().ToList();
             if (reported.Count == 1)
@@ -965,7 +1013,7 @@ namespace UsbProxy
         {
             // Safely eject first: unmount (sync) in the guest, then hand the devices back to Windows.
             bool ejected = Attached(config).Count > 0;
-            if (ejected) Eject(config, "");
+            if (ejected) Eject(config, "", false);
             if (State(config) != "running") return J.Obj("shutdown", true, "ejected", ejected);
             // The sealed disk discards every change at the next start, so cutting the power loses nothing.
             // The drives were already unmounted and synced above, which is what protects their data.

@@ -116,6 +116,7 @@ namespace UsbProxy
         Map switchTarget;
         // Drives auto-switch already tried (or the user ejected) while plugged in; VirtualBox gives a replugged drive a new UUID.
         HashSet<string> autoSkip = new HashSet<string>();
+        List<Map> remembered = new List<Map>();   // drives that go straight to Linux when plugged in (VM filters)
         string editAfter;
         bool refreshWanted;
         DateTime lastDeviceChange = DateTime.MinValue;
@@ -183,7 +184,7 @@ namespace UsbProxy
             actionNames = new Dictionary<string, string> {
                 {"status",T("重新整理")}, {"start",T("啟動 Linux")}, {"shutdown",T("關閉 Linux")}, {"attach",T("切換到 Linux")}, {"eject",T("退出隨身碟")},
                 {"copy",T("複製到隨身碟")}, {"transfer",T("隨身碟間傳輸")}, {"download",T("複製到電腦")}, {"list",T("讀取資料夾")}, {"delete",T("刪除")},
-                {"mkdir",T("新增資料夾")}, {"rename",T("重新命名")}, {"fetch",T("讀取檔案")}, {"setup",T("安裝 Linux 環境")} };
+                {"mkdir",T("新增資料夾")}, {"rename",T("重新命名")}, {"fetch",T("讀取檔案")}, {"setup",T("安裝 Linux 環境")}, {"forget",T("忘記隨身碟")} };
             Build();
             // Local copies of files opened in an earlier session; files still open elsewhere are skipped.
             try { foreach (string d in Directory.GetDirectories(Path.Combine(Core.Runtime, "open"))) try { Directory.Delete(d, true); } catch { } } catch { }
@@ -421,7 +422,7 @@ namespace UsbProxy
                 Text = T("設定"), FormBorderStyle = FormBorderStyle.FixedDialog, MaximizeBox = false, MinimizeBox = false,
                 StartPosition = FormStartPosition.CenterParent, ShowInTaskbar = false, Font = bodyFont,
                 AutoScaleDimensions = new SizeF(96, 96), AutoScaleMode = AutoScaleMode.Dpi,
-                BackColor = Theme.Background, ForeColor = Theme.Label, ClientSize = new Size(420, 372)
+                BackColor = Theme.Background, ForeColor = Theme.Label, ClientSize = new Size(420, 512)
             })
             {
                 NewText(dialog, T("Linux 虛擬機"), 20, 14, 380, 24, headlineFont);
@@ -436,19 +437,40 @@ namespace UsbProxy
                 NewText(dialog, T("下次啟動 Linux 時套用。這台電腦開著 Hyper-V，CPU 多於 1 顆時偶爾會開機卡住（程式會自動重試一次）；卡住請改回 1。"), 20, 124, 380, 52, captionFont, Theme.SecondaryLabel);
                 var autoBox = new CheckBox { Text = T("插入隨身碟時自動切換到 Linux"), Checked = UiB("autoLinux"), Location = new Point(20, 184), Size = new Size(380, 26) };
                 dialog.Controls.Add(autoBox);
-                var updateBox = new CheckBox { Text = T("開啟時自動檢查更新"), Checked = UiB("autoUpdate"), Location = new Point(20, 222), Size = new Size(380, 26) };
+                NewText(dialog, T("記住的隨身碟（插上就直接進 Linux；按「退出」會忘記該支）"), 20, 214, 380, 22, captionFont, Theme.SecondaryLabel);
+                var keepList = new ListBox { Location = new Point(20, 238), Size = new Size(280, 84), IntegralHeight = false };
+                foreach (var d in remembered) keepList.Items.Add((J.S(d, "name") != "" ? J.S(d, "name") + "  " : "") + "(" + J.S(d, "serial") + ")");
+                if (remembered.Count == 0) { keepList.Items.Add(T("（尚無，切換到 Linux 一次就會記住）")); keepList.Enabled = false; }
+                dialog.Controls.Add(keepList);
+                var forgetSerials = new List<string>();
+                var shown = remembered.Select(d => J.S(d, "serial")).ToList();
+                var forgetButton = new Button { Text = T("移除"), Location = new Point(316, 238), Size = new Size(90, 30), Enabled = remembered.Count > 0 };
+                forgetButton.Click += (s, e) =>
+                {
+                    int i = keepList.SelectedIndex;
+                    if (i < 0 || !keepList.Enabled) return;
+                    forgetSerials.Add(shown[i]); shown.RemoveAt(i); keepList.Items.RemoveAt(i);
+                };
+                dialog.Controls.Add(forgetButton);
+                var updateBox = new CheckBox { Text = T("開啟時自動檢查更新"), Checked = UiB("autoUpdate"), Location = new Point(20, 362), Size = new Size(380, 26) };
                 dialog.Controls.Add(updateBox);
-                NewText(dialog, T("目前版本") + " " + Updater.Current, 20, 262, 200, 24, captionFont, Theme.SecondaryLabel);
-                var checkNow = new Button { Text = T("檢查更新"), Location = new Point(220, 258), Size = new Size(186, 30) };
+                NewText(dialog, T("目前版本") + " " + Updater.Current, 20, 402, 200, 24, captionFont, Theme.SecondaryLabel);
+                var checkNow = new Button { Text = T("檢查更新"), Location = new Point(220, 398), Size = new Size(186, 30) };
                 checkNow.Click += (s, e) => { dialog.Close(); CheckUpdate(true); };
                 dialog.Controls.Add(checkNow);
-                var ok = new Button { Text = T("確定"), DialogResult = DialogResult.OK, Location = new Point(220, 326), Size = new Size(90, 30) };
-                var cancel = new Button { Text = T("取消"), DialogResult = DialogResult.Cancel, Location = new Point(316, 326), Size = new Size(90, 30) };
+                var ok = new Button { Text = T("確定"), DialogResult = DialogResult.OK, Location = new Point(220, 466), Size = new Size(90, 30) };
+                var cancel = new Button { Text = T("取消"), DialogResult = DialogResult.Cancel, Location = new Point(316, 466), Size = new Size(90, 30) };
                 dialog.Controls.Add(ok); dialog.Controls.Add(cancel); dialog.AcceptButton = ok; dialog.CancelButton = cancel;
                 if (dialog.ShowDialog(form) != DialogResult.OK) return;
                 changed = (int)cpuBox.Value != UiI("cpus") || (int)memBox.Value != UiI("memory");
                 ui["cpus"] = (int)cpuBox.Value; ui["memory"] = (int)memBox.Value; ui["autoLinux"] = autoBox.Checked; ui["autoUpdate"] = updateBox.Checked;
                 if (autoBox.Checked) { autoSkip.Clear(); refreshWanted = true; }
+                else if (remembered.Count > 0) refreshWanted = true;   // the next status forgets every remembered drive
+                if (forgetSerials.Count > 0)
+                {
+                    if (busy) MessageBox.Show(T("目前有工作進行中，請稍後再移除。"), "USB Proxy");
+                    else BeginOperation(Req("action", "forget", "serials", forgetSerials.ToArray()));
+                }
                 SaveUi();
             }
             if (!changed || vmState != "running") return;

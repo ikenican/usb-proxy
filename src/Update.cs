@@ -11,7 +11,7 @@ namespace UsbProxy
 {
     static class Updater
     {
-        public const string Current = "0.0.6";
+        public const string Current = "0.0.7";
         const string Repo = "ikenican/usb-proxy";
         // Folders that belong to this machine and are never touched by an update.
         static readonly string[] keep = { "runtime", "logs", "backups", "downloads", "dist" };

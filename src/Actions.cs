@@ -444,6 +444,7 @@ namespace UsbProxy
             if (busy) return;
             string action = J.S(request, "action");
             if (action == "start") { request["cpus"] = UiI("cpus"); request["memory"] = UiI("memory"); }
+            if (action == "status" || action == "attach") request["remember"] = UiB("autoLinux");
             try
             {
                 pendingAction = action;
@@ -675,12 +676,24 @@ namespace UsbProxy
                 case "status":
                     {
                         usb = J.Maps(data, "usb");
+                        remembered = J.Maps(data, "remembered");
+                        var oldAttached = attached.Select(d => J.S(d, "uuid")).ToList();
+                        var oldVolumes = volumes.Select(v => J.S(v, "path")).ToList();
                         var vm = J.M(data, "vm");
                         vmState = J.S(vm, "state");
                         attached = J.Maps(vm, "attached").Where(d => J.S(d, "uuid") != "").ToList();
                         ready = false;
                         UpdateGuest(J.M(data, "guest"));
                         if (J.S(data, "message") != "") LogLine(T("Linux 尚未就緒或連線失敗：") + J.S(data, "message"));
+                        // A remembered drive went straight to Linux when it was plugged in: say so and open it.
+                        var arrivedNow = attached.Where(d => !oldAttached.Contains(J.S(d, "uuid"))).ToList();
+                        if (arrivedNow.Count > 0 && switchTarget == null)
+                        {
+                            foreach (var d in arrivedNow) LogLine(string.Format(T("「{0}」已直接切換到 Linux"), J.S(d, "name") != "" ? J.S(d, "name") : T("隨身碟")));
+                            var newVolumes = volumes.Where(v => !oldVolumes.Contains(J.S(v, "path"))).ToList();
+                            if (newVolumes.Count == 1 && lin.Location.Kind == "pc" && followUp == null)
+                                followUp = new FollowUp { Nav = Loc.LinFolder(J.S(newVolumes[0], "path"), ""), Push = true };
+                        }
                         if (switchTarget != null && ready) followUp = FollowUp.Do(Req("action", "attach", "uuid", J.S(switchTarget, "uuid"), "name", J.S(switchTarget, "name")));
                         else if (switchTarget != null) { LogLine(T("Linux 尚未就緒，無法切換隨身碟。")); switchTarget = null; }
                         if (win.Location.Kind == "pc") ShowWinComputer();
@@ -715,6 +728,9 @@ namespace UsbProxy
                         }
                         break;
                     }
+                case "forget":
+                    remembered = J.Maps(data, "remembered");
+                    break;
                 case "setup":
                     LogLine(T("安裝完成，耗時 ") + FormatDuration((int)(DateTime.Now - opStarted).TotalSeconds) + T("。接著第一次啟動 Linux。"));
                     vmState = "poweroff";
@@ -730,6 +746,8 @@ namespace UsbProxy
                     {
                         UpdateGuest(J.M(data, "guest"));
                         switchTarget = null;
+                        // Known before the next status, so that status does not report it as arriving on its own.
+                        attached.Add(J.Obj("uuid", J.S(request, "uuid"), "name", J.S(request, "name")));
                         var fresh = J.Strings(data, "volumes");
                         // Open the drive's only partition; otherwise show every drive in Linux.
                         if (fresh.Count == 1)
