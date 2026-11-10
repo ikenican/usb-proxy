@@ -1,4 +1,4 @@
-// Custom-drawn WinForms controls in the style of Apple's Human Interface Guidelines.
+﻿// Custom-drawn WinForms controls in the style of Apple's Human Interface Guidelines.
 // Compiled at startup by Add-Type (C# 5, .NET Framework 4.7+), so avoid newer syntax.
 using System;
 using System.Collections.Generic;
@@ -13,23 +13,50 @@ namespace UsbProxyUi
 {
     public static class Theme
     {
-        public static readonly Color Background = Color.FromArgb(245, 245, 247);
-        public static readonly Color Surface = Color.White;
-        public static readonly Color Label = Color.FromArgb(29, 29, 31);
-        public static readonly Color SecondaryLabel = Color.FromArgb(110, 110, 115);
-        public static readonly Color TertiaryLabel = Color.FromArgb(160, 160, 165);
-        public static readonly Color Separator = Color.FromArgb(226, 226, 231);
-        public static readonly Color Fill = Color.FromArgb(242, 242, 247);
-        public static readonly Color FillHover = Color.FromArgb(232, 232, 237);
-        public static readonly Color FillPressed = Color.FromArgb(220, 220, 226);
-        public static readonly Color Accent = Color.FromArgb(0, 122, 255);
-        public static readonly Color AccentHover = Color.FromArgb(0, 110, 235);
-        public static readonly Color AccentPressed = Color.FromArgb(0, 94, 204);
-        public static readonly Color AccentTint = Color.FromArgb(232, 241, 255);
-        public static readonly Color Green = Color.FromArgb(52, 199, 89);
-        public static readonly Color Orange = Color.FromArgb(255, 159, 10);
-        public static readonly Color Red = Color.FromArgb(255, 59, 48);
-        public static readonly Color Gray = Color.FromArgb(174, 174, 178);
+        public static Color Background = Color.FromArgb(245, 245, 247);
+        public static Color Surface = Color.White;
+        public static Color Label = Color.FromArgb(29, 29, 31);
+        public static Color SecondaryLabel = Color.FromArgb(110, 110, 115);
+        public static Color TertiaryLabel = Color.FromArgb(160, 160, 165);
+        public static Color Separator = Color.FromArgb(226, 226, 231);
+        public static Color Fill = Color.FromArgb(242, 242, 247);
+        public static Color FillHover = Color.FromArgb(232, 232, 237);
+        public static Color FillPressed = Color.FromArgb(220, 220, 226);
+        public static Color Accent = Color.FromArgb(0, 122, 255);
+        public static Color AccentHover = Color.FromArgb(0, 110, 235);
+        public static Color AccentPressed = Color.FromArgb(0, 94, 204);
+        public static Color AccentTint = Color.FromArgb(232, 241, 255);
+        public static Color Green = Color.FromArgb(52, 199, 89);
+        public static Color Orange = Color.FromArgb(255, 159, 10);
+        public static Color Red = Color.FromArgb(255, 59, 48);
+        public static Color Gray = Color.FromArgb(174, 174, 178);
+
+        public static bool IsDark;
+        // Identity colour of the Windows side, so it never looks like the Linux side.
+        public static Color WindowsBlue = Color.FromArgb(0, 120, 212);
+        public static Color WindowsTint = Color.FromArgb(238, 245, 255);
+
+        // Night palette (Apple dark-mode system colours). Call before any control is created.
+        public static void UseDark()
+        {
+            IsDark = true;
+            Background = Color.FromArgb(28, 28, 30);
+            Surface = Color.FromArgb(44, 44, 46);
+            Label = Color.FromArgb(242, 242, 247);
+            SecondaryLabel = Color.FromArgb(160, 160, 166);
+            TertiaryLabel = Color.FromArgb(110, 110, 116);
+            Separator = Color.FromArgb(58, 58, 60);
+            Fill = Color.FromArgb(58, 58, 60);
+            FillHover = Color.FromArgb(72, 72, 74);
+            FillPressed = Color.FromArgb(86, 86, 88);
+            Accent = Color.FromArgb(10, 132, 255);
+            AccentHover = Color.FromArgb(40, 150, 255);
+            AccentPressed = Color.FromArgb(0, 110, 225);
+            AccentTint = Color.FromArgb(22, 50, 84);
+            Gray = Color.FromArgb(99, 99, 102);
+            WindowsBlue = Color.FromArgb(76, 160, 255);
+            WindowsTint = Color.FromArgb(30, 40, 56);
+        }
 
         public static GraphicsPath RoundRect(RectangleF r, float radius)
         {
@@ -84,6 +111,8 @@ namespace UsbProxyUi
                 DwmSetWindowAttribute(hwnd, 35, ref color, 4);
                 int textColor = text.R | (text.G << 8) | (text.B << 16);
                 DwmSetWindowAttribute(hwnd, 36, ref textColor, 4);
+                int dark = Theme.IsDark ? 1 : 0;
+                DwmSetWindowAttribute(hwnd, 20, ref dark, 4);
                 int round = 2;
                 DwmSetWindowAttribute(hwnd, 33, ref round, 4);
             }
@@ -95,6 +124,9 @@ namespace UsbProxyUi
     {
         Color fill = Theme.Surface;
         public Color FillColor { get { return fill; } set { fill = value; Invalidate(); } }
+        // Empty = the standard separator line.
+        public Color BorderColor { get; set; }
+        public float BorderWidth = 1;
 
         public Card()
         {
@@ -109,9 +141,10 @@ namespace UsbProxyUi
             g.Clear(BackColor);
             g.SmoothingMode = SmoothingMode.AntiAlias;
             float s = Theme.Scale(this);
-            using (var path = Theme.RoundRect(new RectangleF(0.5f, 0.5f, Width - 1.5f, Height - 1.5f), 12 * s))
+            float w = BorderWidth * s, h = w / 2;
+            using (var path = Theme.RoundRect(new RectangleF(h, h, Width - w - 1, Height - w - 1), 12 * s))
             using (var brush = new SolidBrush(fill))
-            using (var pen = new Pen(Theme.Separator, 1))
+            using (var pen = new Pen(BorderColor.IsEmpty ? Theme.Separator : BorderColor, w))
             {
                 g.FillPath(brush, path);
                 g.DrawPath(pen, path);
@@ -668,11 +701,29 @@ namespace UsbProxyUi
         protected override void OnHandleCreated(EventArgs e)
         {
             base.OnHandleCreated(e);
-            SetWindowTheme(Handle, "Explorer", null);
+            SetWindowTheme(Handle, Theme.IsDark ? "DarkMode_Explorer" : "Explorer", null);
+            if (Theme.IsDark)
+            {
+                // Dark column header and scroll bars (Windows 10 1809+; ignored elsewhere).
+                const int LVM_GETHEADER = 0x101F;
+                SetWindowTheme(SendMessage(Handle, LVM_GETHEADER, IntPtr.Zero, IntPtr.Zero), "DarkMode_ItemsView", null);
+            }
+            ForeColor = Theme.Label;
         }
 
         [DllImport("user32.dll")]
         static extern IntPtr SendMessage(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam);
+
+        [StructLayout(LayoutKind.Sequential)]
+        struct NMHDR { public IntPtr hwndFrom; public UIntPtr idFrom; public int code; }
+
+        [StructLayout(LayoutKind.Sequential)]
+        struct NMCUSTOMDRAW
+        {
+            public NMHDR hdr; // nested so x64 padding matches the native layout
+            public int dwDrawStage; public IntPtr hdc;
+            public int left, top, right, bottom; public IntPtr dwItemSpec;
+        }
 
         // Raised for Ctrl + mouse wheel (Delta > 0 zooms in); the list does not scroll then.
         public event MouseEventHandler CtrlWheel;
@@ -680,6 +731,35 @@ namespace UsbProxyUi
         protected override void WndProc(ref Message m)
         {
             const int WM_MOUSEWHEEL = 0x020A, MK_CONTROL = 0x0008;
+            // Dark mode: the themed column header keeps dark text, so recolour it via custom draw.
+            const int WM_NOTIFY = 0x004E, NM_CUSTOMDRAW = -12, CDDS_PREPAINT = 1, CDDS_ITEMPREPAINT = 0x10001;
+            if (m.Msg == WM_NOTIFY && Theme.IsDark)
+            {
+                var nm = (NMCUSTOMDRAW)Marshal.PtrToStructure(m.LParam, typeof(NMCUSTOMDRAW));
+                if (nm.hdr.code == NM_CUSTOMDRAW)
+                {
+                    if (nm.dwDrawStage == CDDS_PREPAINT)
+                    {
+                        using (var g = Graphics.FromHdc(nm.hdc)) g.Clear(Theme.Surface); // area right of the last column
+                        m.Result = (IntPtr)0x20; return; // CDRF_NOTIFYITEMDRAW
+                    }
+                    if (nm.dwDrawStage == CDDS_ITEMPREPAINT)
+                    {
+                        int i = nm.dwItemSpec.ToInt32();
+                        var r = Rectangle.FromLTRB(nm.left, nm.top, nm.right, nm.bottom);
+                        using (var g = Graphics.FromHdc(nm.hdc))
+                        using (var pen = new Pen(Theme.Separator))
+                        {
+                            using (var fill = new SolidBrush(Theme.Surface)) g.FillRectangle(fill, r);
+                            g.DrawLine(pen, r.Right - 1, r.Top + 4, r.Right - 1, r.Bottom - 4);
+                            if (i >= 0 && i < Columns.Count)
+                                TextRenderer.DrawText(g, Columns[i].Text, Font, Rectangle.FromLTRB(r.Left + 6, r.Top, r.Right - 4, r.Bottom),
+                                    Theme.SecondaryLabel, TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
+                        }
+                        m.Result = (IntPtr)4; return; // CDRF_SKIPDEFAULT
+                    }
+                }
+            }
             if (m.Msg == WM_MOUSEWHEEL && (m.WParam.ToInt64() & MK_CONTROL) != 0 && CtrlWheel != null)
             {
                 int delta = (short)((m.WParam.ToInt64() >> 16) & 0xFFFF);

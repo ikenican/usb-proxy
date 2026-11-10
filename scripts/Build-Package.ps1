@@ -9,7 +9,7 @@ foreach ($directory in @('scripts','src','guest')) {
 foreach ($directory in @('runtime','logs','backups','downloads')) {
     New-Item -ItemType Directory -Path (Join-Path $destination $directory) -Force | Out-Null
 }
-foreach ($file in @('Start-USBProxy.cmd','Setup-USBProxy.cmd','README.txt','使用說明.txt')) {
+foreach ($file in @('USB Proxy.exe','Start-USBProxy.cmd','build.cmd','README.txt','使用說明.txt')) {
     Copy-Item -LiteralPath (Join-Path $script:Root $file) -Destination $destination
 }
 $files=@('VirtualBox-7.2.22-175245-Win.exe','virtualbox-SHA256SUMS',

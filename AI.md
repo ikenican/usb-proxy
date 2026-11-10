@@ -8,26 +8,26 @@ A Windows app that manages USB flash drives through an isolated Linux VM. Window
 
 Target: Windows 10/11 x64 without dev tools. Everything runs on built-in Windows PowerShell 5.1 + .NET Framework 4.8 + OpenSSH client. No Python/Visual Studio on the host.
 
-## Layout
+## Layout (v0.0.6+: pure C#, no PowerShell at runtime)
+
+Symantec SONAR blocked the earlier PowerShell-hosting exe, so the Windows side is C# 5 compiled by the in-box
+`%WINDIR%\Microsoft.NET\Framework64\v4.0.30319\csc.exe` (`build.cmd`). No C# 6 syntax (no `$""`, `?.`).
+Never reintroduce PowerShell child processes or `-EncodedCommand`.
 
 | Path | Role |
 |---|---|
-| `Start-USBProxy.cmd` | Launches `src/UsbProxy.ps1` (hidden console, STA). |
-| (first run) | `Start-USBProxy.cmd` alone is enough: worker `status` returns `installed=false` (state `notinstalled`) when VirtualBox or `runtime/config.json` is missing; the UI offers to install and runs worker `setup` (Install-Host.ps1 in a child process — it self-elevates via UAC — then Prepare-VM.ps1, progress phases `virtualbox`/`prepare`), then `start`. |
-| `Setup-USBProxy.cmd` | `scripts/Install-Host.ps1` (elevated; installs signed VirtualBox 7.2.22: app + USB only) then `scripts/Prepare-VM.ps1`. |
-| `src/UsbProxy.ps1` | WinForms UI: two panes in a SplitContainer — left `$win` browses Windows (special folders, drives, folders; synchronous .NET IO), right `$lin` browses volumes in Linux (async via worker `list`). Pane = hashtable (List, Empty, Large image list, Location, History, Back/Up/View). Event handlers find their pane with `Get-PaneOf $sender`. Runs each operation via `Begin-Operation` → spawns `scripts/Worker.ps1`; a 250 ms timer polls for the response and runs `$script:followUp`. Copies: Windows→Linux `copy`, Linux→Linux `transfer`, Linux→Windows `download` (drag-drop with custom format `UsbProxy.LinuxItems`, Ctrl+C/V, or "send to other pane"). |
-| `src/AppleUi.cs` | Custom controls compiled at startup with `Add-Type` (**C# 5 only, ASCII only** — csc reads the file in the system code page). Theme, Card, PillButton, PopupSelect, ThinProgress, PenguinBadge, MenuRenderer, FileEntry, ShellIcons (Windows shell icons/type names), ExplorerListView (Explorer theme, natural sort, Ctrl+wheel event, icon spacing), DeviceChangeWatcher (WM_DEVICECHANGE). |
-| `src/app.ico`, `src/penguin.png` | Window icon; Linux badge drawn on drives. Generated from `linxupenguin.png`. Use the PNG for drawing: .NET cannot decode PNG-compressed ICO frames. |
-| `scripts/Worker.ps1` | One request per process: `status, start, shutdown, attach, eject, list, delete, mkdir, rename, copy, transfer, download, fetch`. Several drives can be attached: `config.attachedUsbs = [{uuid,name,serial}]` (serial as Linux reports it, used to unmount one drive on eject); `status` maps VirtualBox USB devices to Windows drive letters by serial (`Get-Disk`). Reads `-RequestFile`, writes `-ResponseFile` `{ok,data|error}`. Holds `runtime/operation.lock`. Writes progress to `<ResponseFile>.progress`. |
-| `scripts/Common.ps1` | Paths, `Invoke-Native` (with `-Poll` callback), `Invoke-Guest` (ssh → `sudo -n /usr/local/sbin/usbproxy-agent`, JSON on stdin), config helpers. |
-| `guest/usbproxy-agent.py` | Privileged guest agent (runs as root via a single sudoers entry). Only mounts partitions whose block-device ancestry has `TRAN=usb`, each at `/mnt/usbproxy/<device name>` (several at once). Actions include `walk` (files under a selection) and `transfer` (volume→volume, verified). Paths are volume-relative and never follow symlinks (`resolve()`). |
-| `guest/test_agent.py` | Unit tests, run inside the VM (see Testing). |
-| `scripts/New-GuestSeed.ps1` | cloud-init NoCloud seed ISO (user, key, agent via `write_files`, and `guest/packages/*.deb` installed with `dpkg -i` from the ISO — no apt, no network). `-IsoPath/-SeedDirectory` build a seed elsewhere (tests). |
-| `scripts/Build-Package.ps1` | Builds `dist/USBProxy-<timestamp>` (scripts, src, guest, docs, the two installers + checksums, manifest). |
-| `scripts/Test-Integration.ps1`, `New-ValidationDisk.ps1`, `Test-PhysicalUsb.ps1`, `Verify-Project.ps1` | Older validation scripts (emulated FAT32 USB disk; physical drive). Still compatible with the worker. |
-| `runtime/` | **Per machine, never commit**: `config.json`, `id_ed25519` (private key), VM, `jobs/`, `open/` (local copies of opened files), `ui.json` (view/zoom/window size). |
-| `guest/packages/` | The 7 Debian 13 .deb files the base cloud image lacks (exfatprogs, ntfs-3g, libntfs-3g89t64, fuse3, libgcrypt20, libgpg-error0, libgpg-error-l10n) + `SHA256SUMS` (matches Debian's signed index). Setup is fully offline. If the Debian base image is ever updated, regenerate these against it (install online once, copy from `/var/cache/apt/archives`, verify with `apt-cache show`). |
-| `downloads/` | `VirtualBox-7.2.22-175245-Win.exe`, `debian-13-generic-amd64.tar.xz` (not in git; in the release zip) + tracked checksum files. |
+| `USB Proxy.exe` | Built by `build.cmd` from `src/*.cs` (except `Installer.cs`). Flags: `--run req.json` (run one worker request, print JSON), `--smoke-test` (writes `logs/ui-preview.png`), `--update` (headless update), `--cleanup <id>` / `--install-host <log>` (elevated helpers, same exe via UAC). |
+| `src/App.cs`, `src/Actions.cs` | WinForms UI (two panes, settings, update prompts). Jobs run on a background thread (`Worker.Run(Map)`), progress via `volatile Worker.Progress`. |
+| `src/AppleUi.cs` | Custom controls (ASCII only). |
+| `src/Core.cs` | Paths, JSON (`J`), process runner, ssh/scp, `Guest()` call to the agent. |
+| `src/Worker.cs` | `status, start, shutdown, attach, eject, list, delete, mkdir, rename, copy, transfer, download, fetch, setup`. |
+| `src/Setup.cs` | First install: VirtualBox (elevated), VM creation, cloud-init seed. |
+| `src/Update.cs` | Checks GitHub releases of ikenican/usb-proxy, downloads `*-update.zip`, verifies GitHub's sha256 digest, renames the running exe to `.old`, copies files (never `runtime/logs/backups/downloads`). Version: `Updater.Current`. |
+| `src/Installer.cs` | `USBProxy-Setup-vX.exe`: stub + full zip appended + 8-byte length. Per-user install, shortcuts. `--target <dir>` extracts silently. |
+| `guest/usbproxy-agent.py` | Privileged guest agent (see below). |
+| `scripts/Publish-Release.ps1` | Dev only: builds package, full zip, update zip, installer and creates the GitHub release. |
+| `scripts/test_integration.py` | Integration test of `--run` against an emulated FAT32 USB disk. |
+| `runtime/` | **Per machine, never commit**: `config.json`, `id_ed25519`, VM, `ui.json`. |
 
 ## Key flows
 
@@ -62,11 +62,9 @@ Target: Windows 10/11 x64 without dev tools. Everything runs on built-in Windows
 
 ## Releasing
 
-Versions start at `v0.0.1` (pre-release). Bump the patch/minor for each published package.
-
-1. `scripts/Build-Package.ps1` → `dist/USBProxy-<timestamp>` (requires the two installers in `downloads/`; get them from the latest release zip).
-2. Keep only the newest folder in `dist/` (user preference).
-3. Zip it as `USBProxy-<version>-full.zip` and attach it to a GitHub release.
+1. Bump `Updater.Current` in `src/Update.cs`, run `build.cmd`.
+2. `powershell -File scripts\Publish-Release.ps1 -NotesFile notes.md` (needs the two installers in `downloads/`).
+   Installed copies pick the release up through the in-app updater.
 
 ## Status / open items
 
@@ -76,4 +74,4 @@ Versions start at `v0.0.1` (pre-release). Bump the patch/minor for each publishe
 - Verified for 0.0.2: two virtual USB drives mounted at once, folder transfer between them, folder download to Windows, no-overwrite on both sides; live UI maps the real SanDisk to its drive letter. Eject-by-serial is untested (virtual disks share a serial).
 - Ideas not done: drag Linux files out to Explorer, cancel button for transfers, sort arrows in the column header, rename/delete on the Windows side.
 - Legacy scripts (`Test-Integration.ps1`, `Test-PhysicalUsb.ps1`, `Update-Guest.ps1`) predate multi-drive and sealed images.
-- The repo is private and has no license yet.
+- The repo is public and has no license yet.

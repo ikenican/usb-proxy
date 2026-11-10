@@ -92,3 +92,13 @@ function Invoke-Guest($Config, $Request, [int]$TimeoutSeconds = 120, [scriptbloc
     if (-not $response.ok) { throw $response.error }
     return $response.data
 }
+
+# UI language: runtime\ui.json "lang" = zh (default) or en. Source strings are Chinese; T maps them via src\en.json.
+$script:En = $null
+try {
+    if ((Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:Runtime 'ui.json') | ConvertFrom-Json).lang -eq 'en') {
+        $script:En = @{}
+        (Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $script:Root 'src\en.json') | ConvertFrom-Json).PSObject.Properties | ForEach-Object { $script:En[$_.Name] = $_.Value }
+    }
+} catch { $script:En = $null }
+function T([string]$Text) { if ($script:En -and $script:En.ContainsKey($Text)) { $script:En[$Text] } else { $Text } }

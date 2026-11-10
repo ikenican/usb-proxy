@@ -1,2 +1,2 @@
 @echo off
-start "" powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -WindowStyle Hidden -File "%~dp0src\UsbProxy.ps1"
+start "" "%~dp0USB Proxy.exe"

@@ -429,13 +429,58 @@ def stream(request):
     return {'path': rel, 'name': source.name, 'size': size, 'sha256': h.hexdigest()}
 
 
+def wait_volume(request):
+    """After a drive is attached: wait here (not over repeated SSH calls) until a USB volume that is
+    not in 'before' shows up, then mount it if it is the only one, so opening it does not wait again."""
+    before = set(request.get('before') or [])
+    deadline = time.monotonic() + min(float(request.get('timeout', 20)), 60)
+    new = []
+    while time.monotonic() < deadline:
+        new = [v for v in devices() if v['path'] not in before]
+        if new:
+            time.sleep(0.3)   # a drive's other partitions are probed right after the first
+            new = [v for v in devices() if v['path'] not in before]
+            break
+        time.sleep(0.2)
+    if len(new) == 1:
+        try:
+            mount(new[0]['path'])
+        except Exception:
+            pass   # opening the volume mounts it again and reports the actual error
+    return {'ready': Path('/var/lib/usbproxy/ready').exists(), 'volumes': devices(), 'mounted': mounts(),
+            'new': [v['path'] for v in new]}
+
+
+def wait_volume(request):
+    """After a drive is attached: wait here (not over repeated SSH calls) until a USB volume that is
+    not in 'before' shows up, then mount it if it is the only one, so opening it does not wait again."""
+    before = set(request.get('before') or [])
+    deadline = time.monotonic() + min(float(request.get('timeout', 20)), 60)
+    new = []
+    while time.monotonic() < deadline:
+        new = [v for v in devices() if v['path'] not in before]
+        if new:
+            time.sleep(0.3)   # a drive's other partitions are probed right after the first
+            new = [v for v in devices() if v['path'] not in before]
+            break
+        time.sleep(0.2)
+    if len(new) == 1:
+        try:
+            mount(new[0]['path'])
+        except Exception:
+            pass   # opening the volume mounts it again and reports the actual error
+    return {'ready': Path('/var/lib/usbproxy/ready').exists(), 'volumes': devices(), 'mounted': mounts(),
+            'new': [v['path'] for v in new]}
+
+
 def dispatch(request):
     action = request['action']
     if action == 'status':
         return {'ready': Path('/var/lib/usbproxy/ready').exists(),
                 'volumes': devices(), 'mounted': mounts()}
     handlers = {'copy': copy, 'transfer': transfer, 'list': listing, 'walk': walk, 'delete': delete,
-                'mkdir': make_folder, 'rename': rename, 'stream': stream, 'self-update': self_update}
+                'mkdir': make_folder, 'rename': rename, 'stream': stream, 'self-update': self_update,
+                'wait-volume': wait_volume}
     if action in handlers:
         return handlers[action](request)
     if action == 'eject':

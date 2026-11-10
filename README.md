@@ -17,28 +17,31 @@
 - **Linux 每次都從乾淨映像啟動**：安裝完成後映像即封存（約 1.3 GB），每次啟動都還原，不會越用越大，也不殘留暫存資料。
 - 支援 FAT32、exFAT、NTFS、ext4。不提供格式化、分割或整碟寫入。
 
-## 安裝與使用（測試機）
+## 安裝
 
-1. 從 [Releases](../../releases) 下載 `USBProxy-*-full.zip`，解壓縮到本機硬碟。
-2. 執行 `Start-USBProxy.cmd`。第一次開啟會詢問是否安裝，確認後自動安裝官方簽章的 Oracle VirtualBox（僅含主程式與 USB 支援，需核准一次系統管理員提示）、建立 Linux 虛擬機並完成第一次啟動，約 3～5 分鐘，全程可離線。之後直接使用。詳細操作見 [使用說明.txt](使用說明.txt)。
+1. 從 [Releases](../../releases/latest) 下載 **`USBProxy-Setup-v*.exe`** 並執行（不需要系統管理員權限，預設安裝到 `%LOCALAPPDATA%\USBProxy`，會建立開始功能表與桌面捷徑）。
+2. 第一次開啟會詢問是否安裝，確認後自動安裝官方簽章的 Oracle VirtualBox（僅含主程式與 USB 支援，需核准一次系統管理員提示）、建立 Linux 虛擬機並完成第一次啟動，約 3～5 分鐘，全程可離線。
 
-測試機不需要 Visual Studio、WDK 或 Python。
+也可以下載 `USBProxy-v*-full.zip` 解壓縮後執行 `USB Proxy.exe`。詳細操作見 [使用說明.txt](使用說明.txt)。
+
+## 自動更新
+
+開啟時會檢查本 repo 的最新 Release，有新版會詢問是否更新；「設定」可關閉自動檢查或按「檢查更新」。更新只下載小的 `USBProxy-v*-update.zip`（只有程式檔），驗證 SHA-256 後替換，`runtime/`（設定、Linux、金鑰）不受影響，完成後自動重新開啟。
 
 ## 架構
 
 ```
-Windows                                     Linux VM (Debian 13, VirtualBox, NAT)
-src/UsbProxy.ps1  (WinForms UI)             /usr/local/sbin/usbproxy-agent (guest/usbproxy-agent.py)
-  └─ scripts/Worker.ps1 (每個操作一個行程)      ├─ 只掛載 USB 匯流排上的分割區於 /mnt/usbproxy
-       ├─ VBoxManage：啟動/關機/USB 接管          ├─ 列出、刪除、重新命名、新增資料夾
-       └─ ssh/scp (127.0.0.1)  ───────────────►  ├─ 複製：tar 串流 → 寫入 → 讀回 SHA-256 → 原子更名
-                                                  └─ 串流讀取：檔案位元組走 stdout，結果走 stderr
+Windows                                       Linux VM (Debian 13, VirtualBox, NAT)
+USB Proxy.exe (C#, WinForms)                  /usr/local/sbin/usbproxy-agent (guest/usbproxy-agent.py)
+  ├─ 背景執行緒 Worker                           ├─ 只掛載 USB 匯流排上的分割區於 /mnt/usbproxy
+  ├─ VBoxManage：啟動/關機/USB 接管               ├─ 列出、刪除、重新命名、新增資料夾
+  └─ ssh/scp (127.0.0.1)  ─────────────────►   ├─ 複製：tar 串流 → 寫入 → 讀回 SHA-256 → 原子更名
+                                                └─ 串流讀取：檔案位元組走 stdout，結果走 stderr
 ```
 
-- 介面與自繪元件：`src/UsbProxy.ps1`、`src/AppleUi.cs`（啟動時由 PowerShell 編譯）。
-- 背景操作：`scripts/Worker.ps1`，以 JSON 請求／回應檔與介面溝通，進度寫入 `*.progress`。
-- 安裝：`scripts/Install-Host.ps1`、`scripts/Prepare-VM.ps1`、`scripts/New-GuestSeed.ps1`（cloud-init）。
-- 打包：`scripts/Build-Package.ps1` 產生 `dist/USBProxy-<時間>`。
+- 整個 Windows 端以 C# 5 撰寫，用 Windows 內建的編譯器建置（`build.cmd`），不使用 PowerShell。
+- `src/App.cs`、`src/Actions.cs`、`src/AppleUi.cs`：介面；`src/Worker.cs`：背景操作；`src/Setup.cs`：首次安裝；`src/Update.cs`：自動更新；`src/Installer.cs`：安裝程式。
+- 發布：`scripts/Publish-Release.ps1`（安裝程式、完整包、更新包一起上傳到 GitHub Release）。
 
 開發細節、已知限制與後續工作見 [AI.md](AI.md)。
 

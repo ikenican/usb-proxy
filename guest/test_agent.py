@@ -238,5 +238,24 @@ class ProgressTests(unittest.TestCase):
         self.assertEqual(stages, [('write', 'big.bin', 1), ('verify', 'big.bin', 1)])
 
 
+class WaitVolumeTests(unittest.TestCase):
+    def test_new_single_volume_is_found_and_mounted(self):
+        old, new = {'path': '/dev/sdb1'}, {'path': '/dev/sdc1'}
+        seen = iter([[old], [old], [old, new]] + [[old, new]] * 10)
+        mounted = []
+        with patch.object(agent, 'devices', lambda: next(seen)), patch.object(agent, 'mounts', lambda: []), \
+                patch.object(agent, 'mount', mounted.append):
+            result = agent.wait_volume({'before': ['/dev/sdb1'], 'timeout': 5})
+        self.assertEqual(result['new'], ['/dev/sdc1'])
+        self.assertEqual(mounted, ['/dev/sdc1'])
+
+    def test_nothing_new_times_out_without_mounting(self):
+        mounted = []
+        with patch.object(agent, 'devices', lambda: [{'path': '/dev/sdb1'}]), patch.object(agent, 'mounts', lambda: []), \
+                patch.object(agent, 'mount', mounted.append):
+            result = agent.wait_volume({'before': ['/dev/sdb1'], 'timeout': 0.3})
+        self.assertEqual((result['new'], mounted), ([], []))
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

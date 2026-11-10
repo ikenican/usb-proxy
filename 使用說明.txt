@@ -1,13 +1,14 @@
-USB Proxy 開發版
+﻿USB Proxy 開發版
 
 開啟方式
-只要雙擊 Start-USBProxy.cmd。視窗可調整大小、最大化與最小化。
+雙擊「USB Proxy.exe」（整個程式以 C# 寫成，完全不使用 PowerShell、不會出現命令視窗，可釘選到工作列；已開啟時會切回原視窗）。
+整個資料夾可以搬移到其他位置；搬移後第一次開啟會自動把 Linux 虛擬機重新登記到新位置（原設定備份在 backups）。Start-USBProxy.cmd 仍可使用。視窗可調整大小、最大化與最小化。
 全新機台第一次開啟時會詢問是否安裝，按「確定」後自動完成（約 3～5 分鐘，不需要網路）：
   安裝 VirtualBox（Windows 會詢問系統管理員權限，請按「是」）→ 建立 Linux → 第一次啟動並封存乾淨映像。
   過程中上方會顯示目前步驟與預估剩餘時間。若先前取消，按上方「安裝」即可重新開始。
-（Setup-USBProxy.cmd 仍可單獨執行，效果相同。）
 可完全離線安裝：Linux 所需套件已隨附（guest\packages），也不需要在 Windows 安裝 Python。
 1. 視窗分成左右兩邊：左邊是 Windows（桌面、下載、文件、圖片與所有磁碟機），右邊是 Linux（在 Linux 中的隨身碟）。
+   左邊（藍框＝Windows）位址列右側的圖釘圖示切換：實心圖釘＝固定顯示；斜線圖釘＝自動摺疊，滑鼠移到最左邊的 › 長條（或拖檔案到上面）即展開，移開後自動收起。
    中間的分隔線可拖動；兩邊各有返回（←）、上一層（↑）、位址列與檢視（大圖示／清單／詳細資料，Ctrl＋滾輪縮放）。
 2. 在左邊按兩下隨身碟 → 確認「切換到 Linux」（Windows 看得到的隨身碟可選「否」改在 Windows 中開啟）。
    Linux 未啟動時會自動啟動並顯示預估時間。切換後隨身碟出現在右邊；可同時切換多支。
@@ -20,7 +21,11 @@ USB Proxy 開發版
 4. 右邊的其他操作：按兩下開啟檔案（修改存檔後會詢問是否寫回）、存到電腦…、重新命名（F2）、
    刪除（Delete）、新增資料夾、重新整理（F5）。
 5. 完成後在右邊對隨身碟按右鍵 →「退出（交還 Windows）」，即可拔除。
-6. 不使用時按「關閉 Linux」，會先自動退出所有隨身碟。有隨身碟在 Linux 中時關閉視窗，可選擇自動退出並關閉 Linux。
+6. 開啟程式時 Linux 會自動在背景啟動。不使用時按「關閉 Linux」，會先安全退出所有隨身碟，再直接切斷 Linux（下次一律從乾淨映像開機，不受影響），幾秒內完成。有隨身碟在 Linux 中時關閉視窗，可選擇自動退出並關閉 Linux。
+右下角「設定」可調整 Linux 的 CPU 數量與記憶體（下次啟動 Linux 時套用；這台電腦開著 Hyper-V，CPU 多於 1 顆偶爾會開機卡住，卡住請改回 1）。
+「設定」裡的「插入隨身碟時自動切換到 Linux」預設開啟：Linux 就緒時，插入的隨身碟會自動交給 Linux 並開啟，不用再按兩下。按「退出」交還 Windows 的隨身碟不會被再搶走，拔下重插才會再自動切換。
+更新：開啟時會自動到 GitHub（ikenican/usb-proxy）檢查新版本，有新版會詢問是否更新；「設定」裡可關閉自動檢查，或按「檢查更新」手動檢查。更新只換程式檔，runtime（設定、Linux、金鑰）不會被動到，完成後自動重新開啟。進行中的工作或 Linux 中的隨身碟需先完成／退出。
+右下角「English／中文」切換介面語言，「黑夜／白天」切換主題；按下後視窗會自動重新開啟（有工作進行或隨身碟在 Linux 中時，改為下次開啟套用）。
 「活動記錄」（右下角）可查看每個操作的結果與錯誤訊息。
 目前行為
 - 檔案複製到目前瀏覽的資料夾；加入資料夾時保留該資料夾名稱。
@@ -43,7 +48,7 @@ USB Proxy 開發版
 - 沒有安裝橋接、Host-only 網路驅動或 Extension Pack。
 - SSH 僅綁定 127.0.0.1；VM 使用 NAT，首次初始化需下載 Linux 套件。
 - USBSTOR、UASPStor、Secure Boot、記憶體完整性及 Windows 功能未調整。
-- PowerShell Bypass 僅用於工具程序，不變更永久執行原則。
+- 不使用 PowerShell，也不變更執行原則。
 
 備份與移除
 backups 中保留安裝前的相關登錄、驅動清單與安裝紀錄。
@@ -65,10 +70,12 @@ NTFS、其他型號，以及 USBSTOR 停用的目標測試機，需另測。
 部署包另附 development-validation.json，提供不含裝置序號的開發驗證摘要。
 
 開發檔案
-src\UsbProxy.ps1：Windows 視窗介面。
-src\AppleUi.cs：介面自繪元件（啟動時由 PowerShell 編譯）。
-scripts\Worker.ps1：背景控制與主機檔案暫存。
+src\App.cs、src\Actions.cs：Windows 視窗介面。
+src\AppleUi.cs：介面自繪元件。
+src\Worker.cs：背景控制與檔案傳輸；src\Setup.cs：首次安裝；src\Core.cs：共用函式。
+build.cmd：用 Windows 內建的 C# 編譯器重新產生 USB Proxy.exe。
+scripts\test_integration.py：以虛擬 FAT32 隨身碟測試所有檔案操作（開發用）。
 guest\usbproxy-agent.py：Linux USB 分割區掛載、寫入、雜湊驗證與卸載。
 runtime：VM、專用 SSH 金鑰與執行狀態。含私鑰，不要直接對外分享。
 logs：操作錯誤與驗證紀錄。
-Setup-USBProxy.cmd：安裝／初始化入口；需要 downloads 內的已驗證安裝素材。
+downloads：首次安裝所需的已驗證安裝素材。
