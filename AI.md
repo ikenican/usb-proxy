@@ -25,7 +25,7 @@ Never reintroduce PowerShell child processes or `-EncodedCommand`.
 | `src/Update.cs` | Checks GitHub releases of ikenican/usb-proxy, downloads `*-update.zip`, verifies GitHub's sha256 digest, renames the running exe to `.old`, copies files (never `runtime/logs/backups/downloads`). Version: `Updater.Current`. |
 | `src/Installer.cs` | `USBProxy-Setup-vX.exe`: stub + full zip appended + 8-byte length. Per-user install, shortcuts. `--target <dir>` extracts silently. |
 | `guest/usbproxy-agent.py` | Privileged guest agent (see below). |
-| `scripts/Publish-Release.ps1` | Dev only: builds package, full zip, update zip, installer and creates the GitHub release. |
+| `scripts/publish_release.py` | Dev only: builds package, full zip, update zip, installer and creates the GitHub release. |
 | `scripts/test_integration.py` | Integration test of `--run` against an emulated FAT32 USB disk. |
 | `runtime/` | **Per machine, never commit**: `config.json`, `id_ed25519`, VM, `ui.json`. |
 

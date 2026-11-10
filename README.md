@@ -41,7 +41,7 @@ USB Proxy.exe (C#, WinForms)                  /usr/local/sbin/usbproxy-agent (gu
 
 - 整個 Windows 端以 C# 5 撰寫，用 Windows 內建的編譯器建置（`build.cmd`），不使用 PowerShell。
 - `src/App.cs`、`src/Actions.cs`、`src/AppleUi.cs`：介面；`src/Worker.cs`：背景操作；`src/Setup.cs`：首次安裝；`src/Update.cs`：自動更新；`src/Installer.cs`：安裝程式。
-- 發布：`scripts/Publish-Release.ps1`（安裝程式、完整包、更新包一起上傳到 GitHub Release）。
+- 發布：`scripts/publish_release.py`（安裝程式、完整包、更新包一起上傳到 GitHub Release）。
 
 開發細節、已知限制與後續工作見 [AI.md](AI.md)。
 
