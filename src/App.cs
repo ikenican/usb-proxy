@@ -574,10 +574,19 @@ namespace UsbProxy
             ShowWinComputer(); ShowLinComputer(); UpdateState();
             if (winLoc.Kind == "folder") Navigate(win, winLoc, true);
             if (linLoc.Kind == "folder") Navigate(lin, linLoc, true);
-            form.Shown += (s, e) => { timer.Start(); if (logShown) logWindow.Show(); };
+            // Invisible until maximize, splitter and pin (Build's Shown handler) are done and it has painted once;
+            // then it appears in one step over the old window, which closes behind it.
+            form.Opacity = 0;
+            form.Shown += (s, e) => form.BeginInvoke((Action)(() =>
+            {
+                form.Update();
+                form.Opacity = 1;
+                if (appContext != null) appContext.MainForm = form;
+                old.Close(); old.Dispose(); oldTimer.Dispose();
+                timer.Start();
+                if (logShown) logWindow.Show();
+            }));
             form.Show();
-            if (appContext != null) appContext.MainForm = form;
-            old.Close(); old.Dispose(); oldTimer.Dispose();
         }
 
         // ---------------- Helpers ----------------
