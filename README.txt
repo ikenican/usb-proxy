@@ -5,7 +5,7 @@ Setup: just run "USB Proxy.exe"; on first use it offers to install. Approve the 
 Oracle VirtualBox. Only VBoxApplication and VBoxUSB are installed.
 For another PC, use the clean folder under dist/, not a copy of runtime/.
 Start: run "USB Proxy.exe" (pure C#, no PowerShell; rebuild with build.cmd). The window opens on "This PC": double-click a USB drive and confirm to switch it to Linux (Linux starts automatically). The drive then opens in an Explorer-like browser (icons/list/details views): drag files in to copy with SHA-256 verification and progress/ETA, open and edit files (offered back to the drive on save), rename, delete, new folder. Eject returns the drive to Windows; shutting down Linux ejects first.
-Updates: on startup the app checks GitHub releases (ikenican/usb-proxy) and offers newer versions; Settings has "Check for updates" and an option to turn the automatic check off. Only program files are replaced (runtime is kept). Publish a release with scripts\Publish-Release.ps1 after bumping Updater.Current in src\Update.cs.
+Updates: on startup the app checks GitHub releases (ikenican/usb-proxy) and offers newer versions; Settings has "Check for updates" and an option to turn the automatic check off. Only program files are replaced (runtime is kept). Publish a release with scripts\publish_release.py after bumping Updater.Current in src\Update.cs.
 
 The supplied VirtualBoxPortable64 folder is preserved. Its wrapper is not
 executed: its bundled source contains legacy network-driver paths and

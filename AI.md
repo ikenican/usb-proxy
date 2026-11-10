@@ -63,7 +63,7 @@ Never reintroduce PowerShell child processes or `-EncodedCommand`.
 ## Releasing
 
 1. Bump `Updater.Current` in `src/Update.cs`, run `build.cmd`.
-2. `powershell -File scripts\Publish-Release.ps1 -NotesFile notes.md` (needs the two installers in `downloads/`).
+2. `python -I scripts\publish_release.py notes.md` (needs the two installers in `downloads/`).
    Installed copies pick the release up through the in-app updater.
 
 ## Status / open items
