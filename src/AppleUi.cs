@@ -36,7 +36,32 @@ namespace UsbProxyUi
         public static Color WindowsBlue = Color.FromArgb(0, 120, 212);
         public static Color WindowsTint = Color.FromArgb(238, 245, 255);
 
-        // Night palette (Apple dark-mode system colours). Call before any control is created.
+        // Day palette (the initial values), for switching back at run time.
+        public static void UseLight()
+        {
+            IsDark = false;
+            Background = Color.FromArgb(245, 245, 247);
+            Surface = Color.White;
+            Label = Color.FromArgb(29, 29, 31);
+            SecondaryLabel = Color.FromArgb(110, 110, 115);
+            TertiaryLabel = Color.FromArgb(160, 160, 165);
+            Separator = Color.FromArgb(226, 226, 231);
+            Fill = Color.FromArgb(242, 242, 247);
+            FillHover = Color.FromArgb(232, 232, 237);
+            FillPressed = Color.FromArgb(220, 220, 226);
+            Accent = Color.FromArgb(0, 122, 255);
+            AccentHover = Color.FromArgb(0, 110, 235);
+            AccentPressed = Color.FromArgb(0, 94, 204);
+            AccentTint = Color.FromArgb(232, 241, 255);
+            Green = Color.FromArgb(52, 199, 89);
+            Orange = Color.FromArgb(255, 159, 10);
+            Red = Color.FromArgb(255, 59, 48);
+            Gray = Color.FromArgb(174, 174, 178);
+            WindowsBlue = Color.FromArgb(0, 120, 212);
+            WindowsTint = Color.FromArgb(238, 245, 255);
+        }
+
+        // Night palette (Apple dark-mode system colours). Applies to controls created afterwards.
         public static void UseDark()
         {
             IsDark = true;

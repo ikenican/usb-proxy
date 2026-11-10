@@ -824,7 +824,11 @@ namespace UsbProxy
                 }
                 return;
             }
-            // Remember the views, split and window size for next time.
+            SaveWindowState();
+        }
+        // Remember the views, split and window size for next time.
+        void SaveWindowState()
+        {
             try
             {
                 var bounds = form.WindowState == FormWindowState.Normal ? form.ClientSize : form.RestoreBounds.Size;

@@ -102,11 +102,14 @@ namespace UsbProxy
         static Dictionary<string, object> english;
         public static void LoadLanguage()
         {
+            string lang = "zh";
+            try { lang = J.S(J.Read(ReadText(UiFile)), "lang"); } catch { }
+            UseLanguage(lang);
+        }
+        public static void UseLanguage(string lang)
+        {
             english = null;
-            try
-            {
-                if (J.S(J.Read(ReadText(UiFile)), "lang") == "en") english = J.Read(ReadText(Path.Combine(Root, @"src\en.json")));
-            }
+            try { if (lang == "en") english = J.Read(ReadText(Path.Combine(Root, @"src\en.json"))); }
             catch { english = null; }
         }
         public static string T(string text)

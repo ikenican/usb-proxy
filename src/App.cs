@@ -181,10 +181,7 @@ namespace UsbProxy
                 foreach (string key in ui.Keys.ToList()) if (J.Get(saved, key) != null) ui[key] = saved[key];
             }
             catch { }
-            actionNames = new Dictionary<string, string> {
-                {"status",T("重新整理")}, {"start",T("啟動 Linux")}, {"shutdown",T("關閉 Linux")}, {"attach",T("切換到 Linux")}, {"eject",T("退出隨身碟")},
-                {"copy",T("複製到隨身碟")}, {"transfer",T("隨身碟間傳輸")}, {"download",T("複製到電腦")}, {"list",T("讀取資料夾")}, {"delete",T("刪除")},
-                {"mkdir",T("新增資料夾")}, {"rename",T("重新命名")}, {"fetch",T("讀取檔案")}, {"setup",T("安裝 Linux 環境")}, {"forget",T("忘記隨身碟")} };
+            BuildNames();
             Build();
             // Local copies of files opened in an earlier session; files still open elsewhere are skipped.
             try { foreach (string d in Directory.GetDirectories(Path.Combine(Core.Runtime, "open"))) try { Directory.Delete(d, true); } catch { } } catch { }
@@ -201,14 +198,34 @@ namespace UsbProxy
                     form.DrawToBitmap(bitmap, new Rectangle(0, 0, form.Width, form.Height));
                     bitmap.Save(Path.Combine(Core.Root, @"logs\ui-preview.png"), System.Drawing.Imaging.ImageFormat.Png);
                 }
+                ui["theme"] = J.S(ui, "theme") == "dark" ? "light" : "dark"; ui["lang"] = J.S(ui, "lang") == "en" ? "zh" : "en";
+                SwapWindow();
+                Application.DoEvents();
+                using (var bitmap = new Bitmap(form.Width, form.Height))
+                {
+                    form.DrawToBitmap(bitmap, new Rectangle(0, 0, form.Width, form.Height));
+                    bitmap.Save(Path.Combine(Core.Root, @"logs\ui-preview-swapped.png"), System.Drawing.Imaging.ImageFormat.Png);
+                }
+                Console.WriteLine("Swapped: " + form.Controls.Count + " top-level controls");
                 timer.Dispose(); form.Dispose();
                 return 0;
             }
             form.Shown += (s, e) => { timer.Start(); BeginOperation(Req("action", "status")); if (UiB("autoUpdate")) CheckUpdate(false); };
-            try { Application.Run(form); }
+            // A context, not Application.Run(form): switching theme or language swaps in a new window.
+            appContext = new ApplicationContext(form);
+            try { Application.Run(appContext); }
             finally { timer.Stop(); timer.Dispose(); form.Dispose(); }
             if (relaunch) Process.Start(Core.ExePath);
             return 0;
+        }
+        ApplicationContext appContext;
+
+        void BuildNames()
+        {
+            actionNames = new Dictionary<string, string> {
+                {"status",T("重新整理")}, {"start",T("啟動 Linux")}, {"shutdown",T("關閉 Linux")}, {"attach",T("切換到 Linux")}, {"eject",T("退出隨身碟")},
+                {"copy",T("複製到隨身碟")}, {"transfer",T("隨身碟間傳輸")}, {"download",T("複製到電腦")}, {"list",T("讀取資料夾")}, {"delete",T("刪除")},
+                {"mkdir",T("新增資料夾")}, {"rename",T("重新命名")}, {"fetch",T("讀取檔案")}, {"setup",T("安裝 Linux 環境")}, {"forget",T("忘記隨身碟")} };
         }
 
         // ---------------- Layout ----------------
@@ -236,7 +253,7 @@ namespace UsbProxy
 
         void Build()
         {
-            if (J.S(ui, "theme") == "dark") Theme.UseDark();
+            if (J.S(ui, "theme") == "dark") Theme.UseDark(); else Theme.UseLight();
             const string family = "Microsoft JhengHei UI";
             bodyFont = new Font(family, 9.75f);
             headlineFont = new Font(family, 11, FontStyle.Bold);
@@ -270,16 +287,16 @@ namespace UsbProxy
             transferGap = NewSpacer(DockStyle.Bottom, 10); transferGap.Visible = false;
 
             statusBar = new Panel { Size = new Size(innerWidth, 30), BackColor = form.BackColor };
-            statusText = NewText(statusBar, "", 2, 6, innerWidth - 250, 22, captionFont, Theme.SecondaryLabel, TLR);
+            statusText = NewText(statusBar, "", 2, 6, innerWidth - 270, 22, captionFont, Theme.SecondaryLabel, TLR);
             NewButton(statusBar, T("活動記錄"), ButtonKind.Plain, innerWidth - 96, 1, 96, () => { logWindow.Show(); logWindow.Activate(); }, 28, TR);
-            // Language / theme icons: saved to ui.json and applied by reopening the window at once (drives stay in Linux).
+            // Language / theme icons: switch at once (see SetPreference).
             var iconFont = new Font("Segoe MDL2 Assets", 11);
             var tips = new ToolTip();
             var langButton = NewButton(statusBar, "", ButtonKind.Plain, innerWidth - 96 - 40, 1, 36, () => SetPreference("lang", J.S(ui, "lang") == "en" ? "zh" : "en"), 28, TR);
             langButton.Font = iconFont; tips.SetToolTip(langButton, J.S(ui, "lang") == "en" ? "切換成中文" : "Switch to English");
             var themeButton = NewButton(statusBar, J.S(ui, "theme") == "dark" ? "" : "", ButtonKind.Plain, innerWidth - 96 - 80, 1, 36, () => SetPreference("theme", J.S(ui, "theme") == "dark" ? "light" : "dark"), 28, TR);
             themeButton.Font = iconFont; tips.SetToolTip(themeButton, J.S(ui, "theme") == "dark" ? T("切換成白天") : T("切換成黑夜"));
-            NewButton(statusBar, T("設定"), ButtonKind.Plain, innerWidth - 96 - 80 - 64, 1, 60, ShowSettings, 28, TR);
+            NewButton(statusBar, T("設定"), ButtonKind.Plain, innerWidth - 96 - 80 - 84, 1, 80, ShowSettings, 28, TR);
             statusBar.Dock = DockStyle.Bottom;
 
             linuxCard = new Card { Size = new Size(innerWidth, 64) };
@@ -530,11 +547,37 @@ namespace UsbProxy
         }
         void SetPreference(string key, string value)
         {
-            // Colors and texts are fixed when the window is built, so the window reopens (about a second).
-            // Drives in Linux stay there; only a running copy or transfer has to finish first.
+            // Colours and texts are set when controls are created, so an identical window is built with the new
+            // palette/language and swapped in. Everything else (Linux, drives, open folders, history) lives in this
+            // object and carries over. Not during a job: its progress card belongs to the old window.
             if (busy) { MessageBox.Show(T("目前有工作進行中，完成後再切換。"), "USB Proxy"); return; }
             ui[key] = value;
-            relaunch = true; form.Close();
+            SaveWindowState();
+            // After the click that got us here has finished with the old window.
+            form.BeginInvoke((Action)SwapWindow);
+        }
+        void SwapWindow()
+        {
+            Core.UseLanguage(J.S(ui, "lang"));
+            BuildNames();
+            var old = form; var oldTimer = timer; string oldLog = log.Text;
+            bool logShown = logWindow.Visible;
+            Loc winLoc = win.Location, linLoc = lin.Location;
+            List<Loc> winHistory = win.History, linHistory = lin.History;
+            old.FormClosing -= OnClosing;
+            oldTimer.Stop();
+            Build();
+            form.StartPosition = FormStartPosition.Manual;
+            form.Location = old.WindowState == FormWindowState.Normal ? old.Location : old.RestoreBounds.Location;
+            log.Text = oldLog;
+            win.History = winHistory; lin.History = linHistory;
+            ShowWinComputer(); ShowLinComputer(); UpdateState();
+            if (winLoc.Kind == "folder") Navigate(win, winLoc, true);
+            if (linLoc.Kind == "folder") Navigate(lin, linLoc, true);
+            form.Shown += (s, e) => { timer.Start(); if (logShown) logWindow.Show(); };
+            form.Show();
+            if (appContext != null) appContext.MainForm = form;
+            old.Close(); old.Dispose(); oldTimer.Dispose();
         }
 
         // ---------------- Helpers ----------------
