@@ -451,26 +451,76 @@ def wait_volume(request):
             'new': [v['path'] for v in new]}
 
 
-def wait_volume(request):
-    """After a drive is attached: wait here (not over repeated SSH calls) until a USB volume that is
-    not in 'before' shows up, then mount it if it is the only one, so opening it does not wait again."""
-    before = set(request.get('before') or [])
-    deadline = time.monotonic() + min(float(request.get('timeout', 20)), 60)
-    new = []
-    while time.monotonic() < deadline:
-        new = [v for v in devices() if v['path'] not in before]
-        if new:
-            time.sleep(0.3)   # a drive's other partitions are probed right after the first
-            new = [v for v in devices() if v['path'] not in before]
-            break
-        time.sleep(0.2)
-    if len(new) == 1:
+FORMATS = ('vfat', 'exfat', 'ntfs', 'ext4')
+# MBR type byte / GPT type GUID per file system, so Windows recognises the reformatted partition.
+PART_TYPES = {'dos': {'vfat': 'c', 'exfat': '7', 'ntfs': '7', 'ext4': '83'},
+              'gpt': {'vfat': 'EBD0A0A2-B9E5-4433-87C0-68B6B72699C7', 'exfat': 'EBD0A0A2-B9E5-4433-87C0-68B6B72699C7',
+                      'ntfs': 'EBD0A0A2-B9E5-4433-87C0-68B6B72699C7', 'ext4': '0FC63DAF-8483-4772-8E79-3D69D8477DE4'}}
+
+
+def mkfs_command(fstype, label, target):
+    """The mkfs call for one partition; the label is cut to what each file system allows."""
+    label = label or 'USB'
+    if any(ord(c) < 32 for c in label) or any(c in UNSAFE for c in label):
+        raise ValueError('The label contains characters that are not allowed')
+    if fstype == 'vfat':
+        # FAT labels are stored in an OEM code page: ASCII only.
+        return ['mkfs.vfat', '-F', '32', '-n', ''.join(c for c in label.upper() if ord(c) < 128).strip()[:11] or 'USB', target]
+    if fstype == 'exfat':
+        return ['mkfs.exfat', '-L', label[:15], target]
+    if fstype == 'ntfs':
+        return ['mkfs.ntfs', '-Q', '-F', '-L', label[:32], target]
+    if fstype == 'ext4':
+        return ['mkfs.ext4', '-F', '-q', '-L', label[:16], target]
+    raise ValueError('Unsupported file system')
+
+
+def volume_info(request):
+    """Windows-style properties of one USB volume: file system, label, capacity, used and free bytes."""
+    volume = mount(request.get('device', ''))
+    st = os.statvfs(volume['root'])
+    total, free = st.f_blocks * st.f_frsize, st.f_bavail * st.f_frsize
+    info = {k: volume.get(k) for k in ('path', 'size', 'fstype', 'label', 'uuid', 'serial', 'model')}
+    info.update(total=total, free=free, used=total - st.f_bfree * st.f_frsize)
+    return info
+
+
+def format_volume(request):
+    """Re-create the file system on one USB partition (never the partition table or another disk)."""
+    device = request.get('device', '')
+    fstype = request.get('fstype', '')
+    if fstype not in FORMATS:
+        raise ValueError('Unsupported file system')
+    candidates = {d['path']: d for d in devices()}
+    if device not in candidates:
+        raise ValueError('Only a supported USB volume may be formatted')
+    command = mkfs_command(fstype, request.get('label', ''), device)
+    root = mount_root(device)
+    os.sync()
+    if os.path.ismount(root):
+        subprocess.run(['umount', str(root)], check=True, capture_output=True, text=True)
         try:
-            mount(new[0]['path'])
-        except Exception:
-            pass   # opening the volume mounts it again and reports the actual error
-    return {'ready': Path('/var/lib/usbproxy/ready').exists(), 'volumes': devices(), 'mounted': mounts(),
-            'new': [v['path'] for v in new]}
+            os.rmdir(root)
+        except OSError:
+            pass
+    if any(m['source'] == device for m in mounts()) or any(run('lsblk', '-no', 'MOUNTPOINTS', device).split()):
+        raise ValueError('Volume is in use')
+    subprocess.run(['wipefs', '-a', device], check=True, capture_output=True, text=True)
+    result = subprocess.run(command, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise ValueError('Format failed: ' + (result.stderr or result.stdout).strip()[-300:])
+    # Best effort: matching partition type (Windows reads the file system either way).
+    try:
+        disk, number, table = run('lsblk', '-no', 'PKNAME', device), run('lsblk', '-no', 'PARTN', device), ''
+        table = run('lsblk', '-no', 'PTTYPE', '/dev/' + disk.splitlines()[0])
+        part_type = PART_TYPES.get(table.splitlines()[0], {}).get(fstype)
+        if part_type:
+            subprocess.run(['sfdisk', '--part-type', '/dev/' + disk.splitlines()[0], number.splitlines()[0], part_type],
+                           capture_output=True, text=True)
+    except Exception:
+        pass
+    subprocess.run(['udevadm', 'settle', '--timeout=10'], capture_output=True)
+    return {'device': device, 'fstype': fstype, 'volumes': devices()}
 
 
 def dispatch(request):
@@ -480,7 +530,7 @@ def dispatch(request):
                 'volumes': devices(), 'mounted': mounts()}
     handlers = {'copy': copy, 'transfer': transfer, 'list': listing, 'walk': walk, 'delete': delete,
                 'mkdir': make_folder, 'rename': rename, 'stream': stream, 'self-update': self_update,
-                'wait-volume': wait_volume}
+                'wait-volume': wait_volume, 'info': volume_info, 'format': format_volume}
     if action in handlers:
         return handlers[action](request)
     if action == 'eject':

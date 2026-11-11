@@ -109,7 +109,6 @@ namespace UsbProxy
         List<Map> usb = new List<Map>(), volumes = new List<Map>(), attached = new List<Map>();
         bool ready;
         string vmState = "unknown";
-        bool closeWhenDone;
         DateTime lastStoppingPoll = DateTime.MinValue;
         bool pendingNav, pendingNavPush;   // a Linux folder listing is on its way (and whether it goes into history)
         Dictionary<string, long[]> volumeInfo = new Dictionary<string, long[]>();   // device -> {free, total}
@@ -134,7 +133,7 @@ namespace UsbProxy
         int bootEstimate;
         DateTime? winAwaySince;
         Map ui = J.Obj("zoom_win", 0, "zoom_lin", 0, "icon_win", 2, "icon_lin", 2, "width", 1200, "height", 760, "maximized", false,
-            "split", 0.5, "pin_win", true, "lang", "zh", "theme", "light", "cpus", 1, "memory", 1024, "autoLinux", true, "autoUpdate", true, "keepOnClose", true);
+            "split", 0.5, "pin_win", true, "lang", "zh", "theme", "light", "cpus", 1, "memory", 1024, "autoLinux", true, "autoUpdate", true, "shutdownOnClose", false);
         int UiI(string k) { return J.I(ui, k); }
         bool UiB(string k) { return J.B(ui, k); }
         void SaveUi() { try { Core.WriteUtf8(Core.UiFile, J.Write(ui)); } catch { } }
@@ -225,7 +224,7 @@ namespace UsbProxy
             actionNames = new Dictionary<string, string> {
                 {"status",T("重新整理")}, {"start",T("啟動 Linux")}, {"shutdown",T("關閉 Linux")}, {"attach",T("切換到 Linux")}, {"eject",T("退出隨身碟")},
                 {"copy",T("複製到隨身碟")}, {"transfer",T("隨身碟間傳輸")}, {"download",T("複製到電腦")}, {"list",T("讀取資料夾")}, {"delete",T("刪除")},
-                {"mkdir",T("新增資料夾")}, {"rename",T("重新命名")}, {"fetch",T("讀取檔案")}, {"setup",T("安裝 Linux 環境")}, {"forget",T("忘記隨身碟")} };
+                {"mkdir",T("新增資料夾")}, {"rename",T("重新命名")}, {"fetch",T("讀取檔案")}, {"setup",T("安裝 Linux 環境")}, {"forget",T("忘記隨身碟")}, {"info",T("讀取內容")}, {"format",T("格式化")} };
         }
 
         // ---------------- Layout ----------------
@@ -296,7 +295,8 @@ namespace UsbProxy
             langButton.Font = iconFont; tips.SetToolTip(langButton, J.S(ui, "lang") == "en" ? "切換成中文" : "Switch to English");
             var themeButton = NewButton(statusBar, J.S(ui, "theme") == "dark" ? "" : "", ButtonKind.Plain, innerWidth - 96 - 80, 1, 36, () => SetPreference("theme", J.S(ui, "theme") == "dark" ? "light" : "dark"), 28, TR);
             themeButton.Font = iconFont; tips.SetToolTip(themeButton, J.S(ui, "theme") == "dark" ? T("切換成白天") : T("切換成黑夜"));
-            NewButton(statusBar, T("設定"), ButtonKind.Plain, innerWidth - 96 - 80 - 84, 1, 80, ShowSettings, 28, TR);
+            var settingsButton = NewButton(statusBar, "", ButtonKind.Plain, innerWidth - 96 - 120, 1, 36, ShowSettings, 28, TR);   // gear
+            settingsButton.Font = iconFont; tips.SetToolTip(settingsButton, T("設定"));
             statusBar.Dock = DockStyle.Bottom;
 
             linuxCard = new Card { Size = new Size(innerWidth, 64) };
@@ -458,8 +458,8 @@ namespace UsbProxy
                 NewText(dialog, T("下次啟動 Linux 時套用。這台電腦開著 Hyper-V，CPU 多於 1 顆時偶爾會開機卡住（程式會自動重試一次）；卡住請改回 1。"), 20, 124, 380, 52, captionFont, Theme.SecondaryLabel);
                 var autoBox = new CheckBox { Text = T("插入隨身碟時自動切換到 Linux"), Checked = UiB("autoLinux"), Location = new Point(20, 184), Size = new Size(380, 26) };
                 dialog.Controls.Add(autoBox);
-                var keepOpenBox = new CheckBox { Text = T("關閉視窗時隨身碟留在 Linux（不退出，下次開啟直接使用）"), Checked = UiB("keepOnClose"), Location = new Point(20, 212), Size = new Size(390, 26) };
-                dialog.Controls.Add(keepOpenBox);
+                var shutdownBox = new CheckBox { Text = T("關閉工具時一併關閉 Linux（記住的隨身碟下次開啟會自動接上）"), Checked = UiB("shutdownOnClose"), Location = new Point(20, 212), Size = new Size(390, 26) };
+                dialog.Controls.Add(shutdownBox);
                 NewText(dialog, T("記住的隨身碟（插上就直接進 Linux；按「退出」會忘記該支）"), 20, 246, 380, 22, captionFont, Theme.SecondaryLabel);
                 var keepList = new ListBox { Location = new Point(20, 270), Size = new Size(280, 84), IntegralHeight = false };
                 foreach (var d in remembered) keepList.Items.Add((J.S(d, "name") != "" ? J.S(d, "name") + "  " : "") + "(" + J.S(d, "serial") + ")");
@@ -486,7 +486,7 @@ namespace UsbProxy
                 dialog.Controls.Add(ok); dialog.Controls.Add(cancel); dialog.AcceptButton = ok; dialog.CancelButton = cancel;
                 if (dialog.ShowDialog(form) != DialogResult.OK) return;
                 changed = (int)cpuBox.Value != UiI("cpus") || (int)memBox.Value != UiI("memory");
-                ui["cpus"] = (int)cpuBox.Value; ui["memory"] = (int)memBox.Value; ui["autoLinux"] = autoBox.Checked; ui["autoUpdate"] = updateBox.Checked; ui["keepOnClose"] = keepOpenBox.Checked;
+                ui["cpus"] = (int)cpuBox.Value; ui["memory"] = (int)memBox.Value; ui["autoLinux"] = autoBox.Checked; ui["autoUpdate"] = updateBox.Checked; ui["shutdownOnClose"] = shutdownBox.Checked;
                 if (autoBox.Checked) { autoSkip.Clear(); refreshWanted = true; }
                 else if (remembered.Count > 0) refreshWanted = true;   // the next status forgets every remembered drive
                 if (forgetSerials.Count > 0)

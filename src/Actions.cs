@@ -417,9 +417,13 @@ namespace UsbProxy
                 var e = Selected(lin).FirstOrDefault();
                 EjectDrive(e != null && !string.IsNullOrEmpty(e.Uuid) ? e.Uuid : LocationDrive());
             });
+            var lFormat = AddMenuItem(linMenu, T("格式化…"), () => { string d = MenuVolume(); if (d != null) ShowFormat(d); });
             linMenu.Items.Add(new ToolStripSeparator());
             var lNewFolder = AddMenuItem(linMenu, T("新增資料夾"), NewLinuxFolder);
             var lRefresh = AddMenuItem(linMenu, T("重新整理"), () => RefreshPane(lin), "F5");
+            var lInfoGap = new ToolStripSeparator();
+            linMenu.Items.Add(lInfoGap);
+            var lInfo = AddMenuItem(linMenu, T("內容"), () => { string d = MenuVolume(); if (d != null) BeginOperation(Req("action", "info", "device", d)); });
             linMenu.Opening += (s, e) =>
             {
                 var selected = Selected(lin); bool idle = !busy;
@@ -433,7 +437,8 @@ namespace UsbProxy
                 lRename.Visible = inFolder && one; lDelete.Visible = inFolder && selected.Count > 0;
                 lEject.Visible = In(kind, "volume", "linux-device") || (inFolder && selected.Count == 0);
                 lNewFolder.Visible = inFolder;
-                foreach (var item in new[] { lOpen, lSave, lSend, lRename, lDelete, lEject, lNewFolder, lRefresh }) item.Enabled = idle;
+                lInfo.Visible = lFormat.Visible = lInfoGap.Visible = MenuVolume() != null;
+                foreach (var item in new[] { lOpen, lSave, lSend, lRename, lDelete, lEject, lNewFolder, lRefresh, lInfo, lFormat }) item.Enabled = idle;
             };
             lin.List.ContextMenuStrip = linMenu; lin.Empty.ContextMenuStrip = linMenu;
         }
@@ -453,7 +458,11 @@ namespace UsbProxy
                 var started = new Job();
                 job = started;
                 // Background thread: closing the window must not wait for a status check or a boot.
-                new Thread(() => { started.Response = Worker.Run(request); started.Done = true; }) { IsBackground = true }.Start();
+                new Thread(() =>
+                {
+                    started.Response = Worker.Run(request); started.Done = true;
+                    try { form.BeginInvoke((Action)Tick); } catch { }   // the timer would pick it up anyway
+                }) { IsBackground = true }.Start();
                 opStarted = DateTime.Now;
                 if (In(action, "start", "setup"))
                 {
@@ -461,7 +470,7 @@ namespace UsbProxy
                     bootEstimate = action == "setup" ? 75 : BootEstimate();
                     bootProgress.Value = 0; bootProgress.Visible = true;
                 }
-                if (In(action, "copy", "fetch", "transfer", "download")) StartTransferView(request);
+                if (In(action, "copy", "transfer", "download") || (action == "fetch" && J.L(request, "size") >= 5L << 20)) StartTransferView(request);
                 SetBusy(true);
                 if (!quietActions.Contains(action))
                 {
@@ -607,7 +616,6 @@ namespace UsbProxy
             // Claim the finished job first: message boxes below keep this timer ticking, and a second tick
             // must not handle (and report) the same response again.
             var finished = job; job = null;
-            bool succeeded = false;
             string action = pendingAction;
             var request = pendingRequest;
             Map data = null;
@@ -633,7 +641,6 @@ namespace UsbProxy
                     }
                     SetMessage(done);
                 }
-                succeeded = true;
             }
             catch (Exception e)
             {
@@ -648,11 +655,6 @@ namespace UsbProxy
                 if (!quietActions.Contains(action)) MessageBox.Show(string.Format(T("{0}失敗："), actionNames[action]) + "\n\n" + reason, "USB Proxy", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             }
             finally { SetBusy(false); }
-            if (closeWhenDone)
-            {
-                closeWhenDone = false;
-                if (succeeded && action == "shutdown") { form.Close(); return; }
-            }
             if (followUp != null)
             {
                 var next = followUp; followUp = null;
@@ -731,6 +733,14 @@ namespace UsbProxy
                 case "forget":
                     remembered = J.Maps(data, "remembered");
                     break;
+                case "info":
+                    ShowVolumeInfo(data);
+                    break;
+                case "format":
+                    LogLine(string.Format(T("已格式化 {0}（{1}）。"), J.S(request, "device"), FsName(J.S(request, "fstype"))));
+                    if (lin.Location.Kind == "folder" && lin.Location.Device == J.S(request, "device")) ResetLin();
+                    followUp = FollowUp.Do(Req("action", "status"));
+                    break;
                 case "setup":
                     LogLine(T("安裝完成，耗時 ") + FormatDuration((int)(DateTime.Now - opStarted).TotalSeconds) + T("。接著第一次啟動 Linux。"));
                     vmState = "poweroff";
@@ -802,29 +812,28 @@ namespace UsbProxy
 
         void OnClosing(object sender, FormClosingEventArgs e)
         {
+            bool shutdown = UiB("shutdownOnClose") && !relaunch;   // not when restarting after an update
             if (busy)
             {
-                // Starting or checking Linux touches no files, so it can be abandoned; the VM keeps booting on its own.
-                if (In(pendingAction, "status", "start", "list"))
-                {
-                    if (MessageBox.Show(T("仍在啟動或檢查 Linux。要中止並關閉視窗嗎？（Linux 會在背景繼續開機，下次開啟時自動接上）"), "USB Proxy", MessageBoxButtons.OKCancel, MessageBoxIcon.Question) != DialogResult.OK) { e.Cancel = true; return; }
-                    busy = false;
-                }
-                else
+                // Starting or checking Linux touches no files, so it can be abandoned; file work must finish first.
+                if (!In(pendingAction, "status", "start", "list"))
                 {
                     e.Cancel = true; MessageBox.Show(T("正在處理隨身碟上的檔案，請等待完成再關閉，以免資料損壞。"), "USB Proxy"); return;
                 }
-            }
-            if (attached.Count > 0 && !relaunch && !UiB("keepOnClose"))
-            {
-                e.Cancel = true;
-                if (MessageBox.Show(T("仍有隨身碟在 Linux 中。要安全退出、關閉 Linux 後再結束嗎？"), "USB Proxy", MessageBoxButtons.OKCancel, MessageBoxIcon.Question) == DialogResult.OK)
-                {
-                    closeWhenDone = true; BeginOperation(Req("action", "shutdown"));
-                }
-                return;
+                if (!shutdown && MessageBox.Show(T("仍在啟動或檢查 Linux。要中止並關閉視窗嗎？（Linux 會在背景繼續開機，下次開啟時自動接上）"), "USB Proxy", MessageBoxButtons.OKCancel, MessageBoxIcon.Question) != DialogResult.OK) { e.Cancel = true; return; }
             }
             SaveWindowState();
+            if (!shutdown) return;   // Linux and its drives keep running for next time
+            // Shut Linux down with the tool. The ACPI power button lets Debian unmount and flush the drives itself,
+            // so the window closes at once; remembered drives are captured again when Linux next starts.
+            // A boot in progress has nothing mounted and is just stopped.
+            try
+            {
+                string vm = J.S(Core.ReadConfig(), "vmName");
+                if (busy && pendingAction == "start") Core.VBox("controlvm", vm, "poweroff");
+                else if (!In(vmState, "poweroff", "notinstalled", "saved", "aborted")) Core.VBox("controlvm", vm, "acpipowerbutton");
+            }
+            catch { }
         }
         // Remember the views, split and window size for next time.
         void SaveWindowState()
@@ -838,6 +847,91 @@ namespace UsbProxy
                 SaveUi();
             }
             catch { }
+        }
+    
+
+        // ---------------- Drive properties and format (right-click a drive in Linux) ----------------
+        // The drive the Linux menu acts on: a selected volume at the top level, or the volume being browsed.
+        string MenuVolume()
+        {
+            var selected = Selected(lin);
+            if (selected.Count == 1 && selected[0].Kind == "volume") return selected[0].Device;
+            if (selected.Count == 0 && lin.Location.Kind == "folder") return lin.Location.Device;
+            return null;
+        }
+        static string FsName(string fstype)
+        {
+            switch (fstype) { case "vfat": return "FAT32"; case "exfat": return "exFAT"; case "ntfs": return "NTFS"; case "ext4": return "ext4"; default: return fstype.ToUpperInvariant(); }
+        }
+        Form NewDialog(string title, int width, int height)
+        {
+            return new Form
+            {
+                Text = title, FormBorderStyle = FormBorderStyle.FixedDialog, MaximizeBox = false, MinimizeBox = false,
+                StartPosition = FormStartPosition.CenterParent, ShowInTaskbar = false, Font = bodyFont,
+                AutoScaleDimensions = new SizeF(96, 96), AutoScaleMode = AutoScaleMode.Dpi,
+                BackColor = Theme.Background, ForeColor = Theme.Label, ClientSize = new Size(width, height)
+            };
+        }
+        void ShowVolumeInfo(Map info)
+        {
+            string device = J.S(info, "path");
+            long total = J.L(info, "total"), free = J.L(info, "free"), used = J.L(info, "used");
+            string name = J.S(info, "label") != "" ? J.S(info, "label") : T("USB 隨身碟");
+            bool format = false;
+            using (var dialog = NewDialog(name + " " + T("內容"), 400, 330))
+            {
+                NewText(dialog, name, 20, 16, 360, 26, headlineFont);
+                int y = 56;
+                Action<string, string> row = (k, v) => { NewText(dialog, k, 20, y, 110, 22, captionFont, Theme.SecondaryLabel); NewText(dialog, v, 130, y, 250, 22); y += 26; };
+                row(T("類型"), T("USB 隨身碟") + (J.S(info, "model") != "" ? " · " + J.S(info, "model") : ""));
+                row(T("檔案系統"), FsName(J.S(info, "fstype")));
+                row(T("已使用空間"), FormatSize(used) + "  (" + used.ToString("N0") + " " + T("位元組") + ")");
+                row(T("可用空間"), FormatSize(free) + "  (" + free.ToString("N0") + " " + T("位元組") + ")");
+                row(T("容量"), FormatSize(total) + "  (" + total.ToString("N0") + " " + T("位元組") + ")");
+                // Usage bar, like Explorer's: used share in the accent colour.
+                var bar = new Panel { Location = new Point(20, y + 6), Size = new Size(360, 14), BackColor = Theme.Fill };
+                bar.Controls.Add(new Panel { Dock = DockStyle.Left, Width = total > 0 ? (int)(360.0 * used / total) : 0, BackColor = Theme.Accent });
+                dialog.Controls.Add(bar);
+                y += 32;
+                row(T("裝置"), device + (J.S(info, "serial") != "" ? " · " + T("序號") + " " + J.S(info, "serial") : ""));
+                var formatButton = new Button { Text = T("格式化…"), Location = new Point(20, 284), Size = new Size(110, 30), Enabled = !busy };
+                formatButton.Click += (s, e) => { format = true; dialog.Close(); };
+                var ok = new Button { Text = T("確定"), DialogResult = DialogResult.OK, Location = new Point(290, 284), Size = new Size(90, 30) };
+                dialog.Controls.Add(formatButton); dialog.Controls.Add(ok); dialog.AcceptButton = ok; dialog.CancelButton = ok;
+                dialog.ShowDialog(form);
+            }
+            if (format) ShowFormat(device);
+        }
+        void ShowFormat(string device)
+        {
+            if (busy) return;
+            var volume = volumes.FirstOrDefault(v => J.S(v, "path") == device);
+            if (volume == null) return;
+            string name = (J.S(volume, "label") != "" ? J.S(volume, "label") : T("USB 隨身碟")) + " (" + device + ")";
+            string[] types = { "exfat", "vfat", "ntfs", "ext4" };
+            string fstype, label;
+            using (var dialog = NewDialog(T("格式化") + " " + name, 400, 270))
+            {
+                NewText(dialog, T("檔案系統"), 20, 20, 110, 24);
+                var typeBox = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Location = new Point(140, 18), Width = 240 };
+                typeBox.Items.AddRange(new object[] { T("exFAT（建議，Windows／Mac 通用）"), T("FAT32（單檔上限 4 GB）"), "NTFS", T("ext4（只有 Linux 能讀）") });
+                int current = Array.IndexOf(types, J.S(volume, "fstype"));
+                typeBox.SelectedIndex = current >= 0 ? current : 0;
+                dialog.Controls.Add(typeBox);
+                NewText(dialog, T("磁碟區標籤"), 20, 60, 110, 24);
+                var labelBox = new TextBox { Text = J.S(volume, "label"), Location = new Point(140, 58), Width = 240 };
+                dialog.Controls.Add(labelBox);
+                NewText(dialog, T("格式化會清除這個分割區上的所有資料，無法復原。只會格式化這個分割區，不會變更分割表。"), 20, 100, 360, 66, captionFont, Theme.Red);
+                var ok = new Button { Text = T("開始"), DialogResult = DialogResult.OK, Location = new Point(194, 222), Size = new Size(90, 30) };
+                var cancel = new Button { Text = T("取消"), DialogResult = DialogResult.Cancel, Location = new Point(290, 222), Size = new Size(90, 30) };
+                dialog.Controls.Add(ok); dialog.Controls.Add(cancel); dialog.CancelButton = cancel;
+                if (dialog.ShowDialog(form) != DialogResult.OK) return;
+                fstype = types[typeBox.SelectedIndex]; label = labelBox.Text.Trim();
+            }
+            if (MessageBox.Show(form, string.Format(T("確定要把「{0}」格式化為 {1} 嗎？\n\n上面所有的檔案都會被清除，無法復原。"), name, FsName(fstype)),
+                T("格式化"), MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) != DialogResult.Yes) return;
+            BeginOperation(Req("action", "format", "device", device, "fstype", fstype, "label", label));
         }
     }
 }

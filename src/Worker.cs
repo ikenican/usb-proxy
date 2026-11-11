@@ -685,13 +685,14 @@ namespace UsbProxy
                 case "start": return Start(config, request);
                 case "attach": return Attach(config, request);
                 case "copy": return Copy(config, request);
-                case "list": case "delete": case "mkdir": case "rename":
+                case "list": case "delete": case "mkdir": case "rename": case "info": case "format":
                     {
-                        RequireRunning(config);
+                        if (action != "list") RequireRunning(config);
                         var g = J.Obj("action", action, "device", J.S(request, "device"));
-                        foreach (string key in new[] { "path", "name" }) if (J.Get(request, key) != null) g[key] = J.S(request, key);
+                        foreach (string key in new[] { "path", "name", "fstype", "label" }) if (J.Get(request, key) != null) g[key] = J.S(request, key);
                         if (J.Get(request, "paths") != null) g["paths"] = J.Strings(request, "paths").ToArray();
-                        return Core.Guest(config, g, 600);
+                        try { return Core.Guest(config, g, 600); }
+                        catch { RequireRunning(config); throw; }
                     }
                 case "fetch": return Fetch(config, request);
                 case "transfer": return Transfer(config, request);
@@ -848,7 +849,7 @@ namespace UsbProxy
             var device = UsbDevices(true).Where(d => J.S(d, "uuid") == uuid).ToList();   // the UI already chose a drive; only its state is needed
             if (device.Count != 1) throw new ToolException("USB device is no longer available. Refresh the list.");
             string current = J.S(device[0], "Current State");
-            string replug = T("若跳出系統管理員確認請按「是」。然後拔下這支隨身碟，等 3 秒再插回，會自動切換到 Linux，不用再按。");
+            string replug = T("請拔下這支隨身碟再插回，就會出現在 Linux 中。");
             if (current == "Captured")
             {
                 // VirtualBox took the drive from Windows but never handed it to a VM (seen with USBSTOR disabled).
@@ -938,7 +939,7 @@ namespace UsbProxy
 
         static Map Fetch(Map config, Map request)
         {
-            RequireRunning(config);
+            // No VirtualBox state check up front (it costs a VBoxManage call); a failure explains itself below.
             string leaf = J.S(request, "path").Split('/').Last();
             string folder = Path.Combine(Core.Runtime, "open", Core.NewId());
             Directory.CreateDirectory(folder);
@@ -946,7 +947,7 @@ namespace UsbProxy
             StartTransfer(J.L(request, "size"), 1);
             Map result;
             try { result = ReceiveStream(config, J.Obj("action", "stream", "device", J.S(request, "device"), "path", J.S(request, "path")), local, leaf); }
-            catch { try { Directory.Delete(folder, true); } catch { } throw; }
+            catch { try { Directory.Delete(folder, true); } catch { } RequireRunning(config); throw; }
             string saveTo = J.S(request, "saveTo");
             if (saveTo != "")
             {
