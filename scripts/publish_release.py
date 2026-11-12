@@ -7,7 +7,7 @@ import os, re, shutil, struct, subprocess, sys, zipfile
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 REPO = 'ikenican/usb-proxy'
 PROGRAM = ['USB Proxy.exe', 'build.cmd', '使用說明.txt', 'src', 'scripts', 'guest']
-DOWNLOADS = ['VirtualBox-7.2.22-175245-Win.exe', 'virtualbox-SHA256SUMS', 'debian-13-generic-amd64.tar.xz', 'debian-SHA512SUMS']
+DOWNLOADS = ['VirtualBox-7.2.22-175245-Win.exe', 'virtualbox-SHA256SUMS', 'debian-13-generic-amd64.raw.zip', 'debian-SHA512SUMS']
 EMPTY = ['runtime', 'logs', 'backups']
 
 def files(rel):
@@ -23,7 +23,21 @@ def make_zip(path, rels, empty=()):
             for f in files(rel): z.write(os.path.join(ROOT, f), f.replace(os.sep, '/'))
         for d in empty: z.writestr(d + '/', '')
 
+def make_raw_zip():
+    # Debian's tar.xz repacked as a zip of the unmodified disk.raw: tar.exe on Windows 10 cannot read xz.
+    out = os.path.join(ROOT, 'downloads', 'debian-13-generic-amd64.raw.zip')
+    if os.path.exists(out): return
+    import tarfile
+    with tarfile.open(os.path.join(ROOT, 'downloads', 'debian-13-generic-amd64.tar.xz')) as t, \
+         zipfile.ZipFile(out + '.tmp', 'w', zipfile.ZIP_DEFLATED) as z:
+        info = zipfile.ZipInfo('debian-13-generic-amd64.raw', (2025, 1, 1, 0, 0, 0))
+        info.compress_type = zipfile.ZIP_DEFLATED
+        with t.extractfile(t.getmember('disk.raw')) as src, z.open(info, 'w', force_zip64=True) as dst:
+            shutil.copyfileobj(src, dst, 1 << 24)
+    os.replace(out + '.tmp', out)
+
 def main():
+    make_raw_zip()
     notes = sys.argv[1]
     version = re.search(r'Current = "([^"]+)"', open(os.path.join(ROOT, 'src', 'Update.cs'), encoding='utf-8').read()).group(1)
     dist = os.path.join(ROOT, 'dist')

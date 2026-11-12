@@ -5,6 +5,7 @@ using System.Collections.Generic;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
+using System.IO.Compression;
 using System.Linq;
 using System.Management;
 using System.Net;
@@ -23,7 +24,9 @@ namespace UsbProxy
     public static class Setup
     {
         const string Installer = "VirtualBox-7.2.22-175245-Win.exe";
-        const string DebianArchive = "debian-13-generic-amd64.tar.xz";
+        // Debian's official raw disk image, zip-compressed because tar.exe on Windows 10 and older Windows 11 cannot
+        // read .xz. The extracted image is checked against Debian's own SHA512SUMS entry for the .raw file.
+        const string DebianArchive = "debian-13-generic-amd64.raw.zip";
         static string Downloads(string name) { return Path.Combine(Core.Root, "downloads", name); }
 
         public static Map Run()
@@ -168,22 +171,23 @@ namespace UsbProxy
         static void PrepareVm()
         {
             if (File.Exists(Core.ConfigFile)) { Core.VBox("showvminfo", J.S(Core.ReadConfig(), "vmName"), "--machinereadable"); return; }
-            string archive = Downloads(DebianArchive);
-            var lines = File.ReadAllLines(Downloads("debian-SHA512SUMS")).Where(l => Regex.IsMatch(l, "\\s\\*?debian-13-generic-amd64\\.tar\\.xz$")).ToList();
-            if (lines.Count != 1) throw new ToolException("Cannot identify Debian archive checksum.");
+            var lines = File.ReadAllLines(Downloads("debian-SHA512SUMS")).Where(l => Regex.IsMatch(l, "\\s\\*?debian-13-generic-amd64\\.raw$")).ToList();
+            if (lines.Count != 1) throw new ToolException("Cannot identify Debian image checksum.");
             string expected = Regex.Split(lines[0], "\\s+")[0];
-            string actual;
-            using (var sha = SHA512.Create()) using (var s = File.OpenRead(archive)) actual = Core.Hex(sha.ComputeHash(s));
-            if (!string.Equals(actual, expected, StringComparison.OrdinalIgnoreCase)) throw new ToolException("Debian archive SHA512 mismatch.");
             string diskDir = Path.Combine(Core.Runtime, "disk");
             Directory.CreateDirectory(diskDir);
-            var entries = Regex.Split(Core.Run("tar.exe", new[] { "-tf", archive }, "", 600), "\\r?\\n");
-            if (entries.Any(e => Regex.IsMatch(e, "(^/|(^|/)\\.\\.(/|$))"))) throw new ToolException("Unsafe archive paths.");
-            Core.Run("tar.exe", new[] { "-xf", archive, "-C", diskDir }, "", 600);
-            var raw = Directory.GetFiles(diskDir, "*.raw", SearchOption.AllDirectories);
-            if (raw.Length != 1) throw new ToolException("Expected one raw Debian disk.");
+            string raw = Path.Combine(diskDir, "disk.raw");
+            using (var zip = ZipFile.OpenRead(Downloads(DebianArchive)))
+            {
+                var entries = zip.Entries.Where(e => e.Name.EndsWith(".raw", StringComparison.OrdinalIgnoreCase)).ToList();
+                if (entries.Count != 1) throw new ToolException("Expected one raw Debian disk.");
+                entries[0].ExtractToFile(raw, true);
+            }
+            string actual;
+            using (var sha = SHA512.Create()) using (var s = File.OpenRead(raw)) actual = Core.Hex(sha.ComputeHash(s));
+            if (!string.Equals(actual, expected, StringComparison.OrdinalIgnoreCase)) { Directory.Delete(diskDir, true); throw new ToolException("Debian image SHA512 mismatch."); }
             string vdi = Path.Combine(Core.Runtime, "usbproxy.vdi");
-            Core.Run(Core.VBoxManage, new[] { "convertfromraw", raw[0], vdi, "--format", "VDI", "--variant", "Standard" }, "", 600);
+            Core.Run(Core.VBoxManage, new[] { "convertfromraw", raw, vdi, "--format", "VDI", "--variant", "Standard" }, "", 600);
             Core.VBox("modifymedium", "disk", vdi, "--resize", "32768");
             // The extracted raw image (about 3 GB) is only an intermediate for the VDI.
             Directory.Delete(diskDir, true);
