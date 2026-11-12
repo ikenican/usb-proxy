@@ -199,7 +199,7 @@ namespace UsbProxy
             string name = "USBProxy-" + Core.NewId().Substring(0, 8);
             Core.VBox("createvm", "--name", name, "--ostype", "Debian_64", "--basefolder", Path.Combine(Core.Runtime, "machines"), "--register");
             // Save immediately: a failed subsequent step leaves an identifiable VM for recovery.
-            Core.SaveConfig(J.Obj("vmName", name, "sshPort", port, "created", DateTime.Now.ToString("o"), "disk", vdi, "attachedUsb", null));
+            Core.SaveConfig(J.Obj("vmName", name, "sshPort", port, "created", DateTime.Now.ToString("o"), "disk", vdi));
             Core.VBox("modifyvm", name, "--memory", "1024", "--cpus", "1", "--graphicscontroller", "vmsvga",
                 "--vram", "16", "--audio-enabled", "off", "--usb-xhci", "on", "--nic1", "nat", "--nictype1", "82540EM",
                 "--natpf1", "ssh,tcp,127.0.0.1," + port + ",,22", "--boot1", "disk", "--boot2", "none", "--boot3", "none", "--boot4", "none");

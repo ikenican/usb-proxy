@@ -15,7 +15,6 @@ namespace UsbProxy
         const string Repo = "ikenican/usb-proxy";
         // Folders that belong to this machine and are never touched by an update.
         static readonly string[] keep = { "runtime", "logs", "backups", "downloads", "dist" };
-        static string token;
 
         // The newest release above this version that has an update zip, or null. Throws when GitHub can't be reached.
         public static Map Check()
@@ -84,26 +83,10 @@ namespace UsbProxy
         static byte[] GetBytes(string url, string accept)
         {
             ServicePointManager.SecurityProtocol |= SecurityProtocolType.Tls12;
-            try { return Fetch(url, accept, token); }
-            catch (WebException ex)
-            {
-                // A private repository answers 404 without a login; use the GitHub CLI login on this PC when there is one.
-                var response = ex.Response as HttpWebResponse;
-                if (token != null || response == null || response.StatusCode != HttpStatusCode.NotFound) throw;
-                string gh = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), @"GitHub CLI\gh.exe");
-                if (!File.Exists(gh)) throw;
-                try { token = Core.Run(gh, new[] { "auth", "token" }, "", 20).Trim(); } catch { throw ex; }
-                return Fetch(url, accept, token);
-            }
-        }
-
-        static byte[] Fetch(string url, string accept, string auth)
-        {
             using (var client = new WebClient())
             {
                 client.Headers[HttpRequestHeader.UserAgent] = "USBProxy/" + Current;
                 client.Headers[HttpRequestHeader.Accept] = accept;
-                if (auth != null) client.Headers[HttpRequestHeader.Authorization] = "Bearer " + auth;
                 return client.DownloadData(url);
             }
         }

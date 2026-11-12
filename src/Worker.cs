@@ -147,18 +147,14 @@ namespace UsbProxy
             return list;
         }
 
-        // Drives handed to Linux: [{uuid, name, serial}]. Older configs stored a single attachedUsb.
+        // Drives handed to Linux: [{uuid, name, serial}].
         public static List<Map> Attached(Map config)
         {
-            var list = J.Maps(config, "attachedUsbs").Where(d => J.S(d, "uuid") != "").ToList();
-            if (list.Count == 0 && J.S(config, "attachedUsb") != "")
-                list.Add(J.Obj("uuid", J.S(config, "attachedUsb"), "name", J.S(config, "attachedName"), "serial", ""));
-            return list;
+            return J.Maps(config, "attachedUsbs").Where(d => J.S(d, "uuid") != "").ToList();
         }
         static void SetAttached(Map config, List<Map> list)
         {
             config["attachedUsbs"] = list.ToArray();
-            config.Remove("attachedUsb"); config.Remove("attachedName");
             Core.SaveConfig(config);
         }
 
@@ -408,7 +404,7 @@ namespace UsbProxy
         static string AgentFile { get { return Path.Combine(Core.Root, @"guest\usbproxy-agent.py"); } }
         static string LocalAgentHash() { return Core.Sha256File(AgentFile); }
 
-        static bool SyncGuestAgent(Map config, bool noReseed)
+        static bool SyncGuestAgent(Map config)
         {
             string expected = LocalAgentHash();
             Func<string> guestHash = () => Regex.Split(Core.Ssh(config, "sha256sum /usr/local/sbin/usbproxy-agent"), "\\s+")[0];
@@ -421,22 +417,7 @@ namespace UsbProxy
             string staged = "/home/usbproxy/incoming/agent-" + Core.NewId() + ".py";
             var scp = Core.SshArgs(config, true); scp.Add(AgentFile); scp.Add("usbproxy@127.0.0.1:" + staged);
             Core.Run("scp.exe", scp);
-            try
-            {
-                Core.Guest(config, J.Obj("action", "self-update", "source", staged, "sha256", expected));
-            }
-            catch (ToolException e)
-            {
-                if (!e.Message.Contains("Unknown action")) throw;
-                if (noReseed) return false;
-                // Agents older than self-update are replaced by re-running cloud-init with a fresh seed.
-                // The disk is unsealed so the update persists; the caller seals it again afterwards.
-                StopGuestVm(config);
-                if (DiskSealed(config)) SetDiskType(config, "normal");
-                Setup.NewGuestSeed();
-                StartGuestVm(config);
-                if (!WaitGuestReady(config, 600)) throw new ToolException("Linux did not come back after updating the guest agent.");
-            }
+            try { Core.Guest(config, J.Obj("action", "self-update", "source", staged, "sha256", expected)); }
             finally { try { Core.Ssh(config, "rm -f -- " + staged); } catch { } }
             if (guestHash() != expected) throw new ToolException("Guest agent update could not be verified.");
             config["agentHash"] = expected;
@@ -718,7 +699,7 @@ namespace UsbProxy
             {
                 try { guest = GuestStatus(config); } catch (Exception e) { message = e.Message; }
                 // An already-running guest picks up a newer agent without a restart.
-                if (guest != null && J.S(config, "agentHash") != LocalAgentHash()) try { SyncGuestAgent(config, true); } catch { }
+                if (guest != null && J.S(config, "agentHash") != LocalAgentHash()) try { SyncGuestAgent(config); } catch { }
                 // Pick up drives that arrived in the VM on replug (see SyncAttached).
                 try
                 {
@@ -808,7 +789,7 @@ namespace UsbProxy
                         config["bootSeconds"] = history.Skip(Math.Max(0, history.Count - 5)).ToArray();
                         Core.SaveConfig(config);
                     }
-                    bool updated = SyncGuestAgent(config, false);
+                    bool updated = SyncGuestAgent(config);
                     bool sealedNow = false;
                     if (!DiskSealed(config))
                     {
@@ -818,7 +799,7 @@ namespace UsbProxy
                         SetDiskType(config, "immutable");
                         StartGuestVm(config);
                         if (!WaitGuestReady(config, 300)) throw new ToolException("Linux did not start from the sealed image.");
-                        SyncGuestAgent(config, false);
+                        SyncGuestAgent(config);
                         sealedNow = true;
                     }
                     return J.Obj("ready", true, "vmName", J.S(config, "vmName"), "retried", retried, "agentUpdated", updated, "sealed", sealedNow);
@@ -875,17 +856,6 @@ namespace UsbProxy
             try { guest = Core.Guest(config, J.Obj("action", "wait-volume", "before", before.ToArray(), "timeout", 20), 45); } catch { }
             Func<Map, List<Map>> newOf = g => J.Maps(g, "volumes").Where(v => !before.Contains(J.S(v, "path"))).ToList();
             var fresh = newOf(guest);
-            if (guest == null)
-            {
-                // Older agent in the guest: poll from here.
-                DateTime deadline = DateTime.Now.AddSeconds(20);
-                do
-                {
-                    Core.Sleep(1000);
-                    try { guest = GuestStatus(config); } catch { }
-                    fresh = newOf(guest);
-                } while ((guest == null || fresh.Count == 0) && DateTime.Now < deadline);
-            }
             if (guest == null) guest = GuestStatus(config);
             if (fresh.Count == 0 && !VBox("showvminfo", J.S(config, "vmName"), "--machinereadable").Contains(uuid))
             {

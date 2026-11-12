@@ -1,9 +1,10 @@
 # Integration test of "USB Proxy.exe --run" against an emulated FAT32 USB disk (/dev/sdb in the guest).
-# Development only; never touches a real USB drive. Setup: create the disk with scripts\New-ValidationDisk.ps1,
-# stop Linux, then
+# Development only; never touches a real USB drive. Setup: stop Linux, then
+#   VBoxManage createmedium disk --filename runtime\validation\fat32.vdi --size 128
 #   VBoxManage storagectl <vm> --name ValidationUSB --add usb --controller USB --bootable off
 #   VBoxManage storageattach <vm> --storagectl ValidationUSB --port 0 --device 0 --type hdd --medium runtime\validation\fat32.vdi
-# start Linux and run: python -I scripts\test_integration.py. Afterwards detach the disk and remove the controller.
+# start Linux, run "sudo mkfs.vfat -I -n USBPROXYTST /dev/sdb" in it once, then: python -I scripts\test_integration.py.
+# Afterwards detach the disk and remove the controller.
 import json, os, subprocess, sys, tempfile, shutil, filecmp, time
 EXE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'USB Proxy.exe')
 work = os.path.join(tempfile.gettempdir(), 'upbuild')

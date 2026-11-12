@@ -6,7 +6,7 @@
 import os, re, shutil, struct, subprocess, sys, zipfile
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 REPO = 'ikenican/usb-proxy'
-PROGRAM = ['USB Proxy.exe', 'Start-USBProxy.cmd', 'build.cmd', 'README.txt', '使用說明.txt', 'src', 'scripts', 'guest']
+PROGRAM = ['USB Proxy.exe', 'build.cmd', '使用說明.txt', 'src', 'scripts', 'guest']
 DOWNLOADS = ['VirtualBox-7.2.22-175245-Win.exe', 'virtualbox-SHA256SUMS', 'debian-13-generic-amd64.tar.xz', 'debian-SHA512SUMS']
 EMPTY = ['runtime', 'logs', 'backups']
 
