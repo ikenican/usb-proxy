@@ -121,36 +121,190 @@ namespace UsbProxy
         // Copies in every direction: Windows -> Linux (copy), Linux -> Linux (transfer), Linux -> Windows (download).
         void CopyToLinux(IEnumerable<string> paths, string device, string folder, bool move = false)
         {
-            var list = paths.Where(p => !string.IsNullOrEmpty(p)).ToArray();
-            if (busy || string.IsNullOrEmpty(device) || list.Length == 0) return;
+            var list = paths.Where(p => !string.IsNullOrEmpty(p)).ToList();
+            if (busy || string.IsNullOrEmpty(device) || list.Count == 0) return;
+            List<string> names, replace;
+            if (!PlanNames(list, WinInfo, n => LinuxExisting(device, folder, n), false, Path.GetDirectoryName(list[0]), LinPlace(device, folder), out names, out replace) || list.Count == 0) return;
             if (lin.Location.Kind == "folder") followUp = FollowUp.NavTo(lin.Location);
-            BeginOperation(Req("action", "copy", "device", device, "dest", folder, "paths", list, "move", move));
+            BeginOperation(Req("action", "copy", "device", device, "dest", folder, "paths", list.ToArray(), "names", names.ToArray(), "replace", replace.ToArray(), "move", move));
         }
         void TransferInLinux(Clip clip, string device, string folder)
         {
             if (busy || clip == null || string.IsNullOrEmpty(device)) return;
-            // Dropping items back into their own folder is a no-op.
-            if (clip.Device == device && clip.Paths.All(p => ParentPath(p) == folder)) return;
+            // Pasted into their own folder: copies named "name - 複製" as in Explorer; a cut there does nothing.
+            bool sameFolder = clip.Device == device && clip.Paths.All(p => ParentPath(p) == folder);
+            if (sameFolder && clip.Cut) return;
+            var list = clip.Paths.ToList();
+            List<string> names, replace;
+            if (!PlanNames(list, p => EntryInfo(clip.Entries == null ? null : clip.Entries.FirstOrDefault(e => e.Path == p)),
+                n => LinuxExisting(device, folder, n), sameFolder, LinPlace(clip.Device, ParentPath(list[0])), LinPlace(device, folder), out names, out replace) || list.Count == 0) return;
             if (lin.Location.Kind == "folder") followUp = FollowUp.NavTo(lin.Location);
-            BeginOperation(Req("action", "transfer", "source", clip.Device, "paths", clip.Paths.ToArray(), "device", device, "dest", folder, "move", clip.Cut));
+            BeginOperation(Req("action", "transfer", "source", clip.Device, "paths", list.ToArray(), "names", names.ToArray(), "replace", replace.ToArray(),
+                "device", device, "dest", folder, "move", clip.Cut));
         }
         void DownloadToWindows(Clip clip, string folder)
         {
             if (busy || clip == null || string.IsNullOrEmpty(folder)) return;
+            var list = clip.Paths.ToList();
+            List<string> names, replace;
+            if (!PlanNames(list, p => EntryInfo(clip.Entries == null ? null : clip.Entries.FirstOrDefault(e => e.Path == p)),
+                n => { try { return WinInfo(Path.Combine(folder, n)); } catch { return null; } }, false, LinPlace(clip.Device, ParentPath(list[0])), folder, out names, out replace) || list.Count == 0) return;
             followUp = new FollowUp { RefreshWin = true };
-            BeginOperation(Req("action", "download", "device", clip.Device, "paths", clip.Paths.ToArray(), "destination", folder, "move", clip.Cut));
+            BeginOperation(Req("action", "download", "device", clip.Device, "paths", list.ToArray(), "names", names.ToArray(), "replace", replace.ToArray(),
+                "destination", folder, "move", clip.Cut));
         }
+        // ---------------- Name conflicts, as in Explorer ----------------
+        class ItemInfo { public string Name, Place = ""; public bool Folder; public long Size; public DateTime Modified; }
+        string LinPlace(string device, string folder) { return "Linux  ›  " + VolumeLabel(device) + string.Concat(folder.Split('/').Where(x => x != "").Select(x => "  ›  " + x)); }
+        static string Leaf(string path) { return path.TrimEnd('/', '\\').Split('/', '\\').Last(); }
+        static ItemInfo WinInfo(string path)
+        {
+            try
+            {
+                if (Directory.Exists(path)) { var d = new DirectoryInfo(path); return new ItemInfo { Name = d.Name, Folder = true, Modified = d.LastWriteTime }; }
+                if (File.Exists(path)) { var f = new FileInfo(path); return new ItemInfo { Name = f.Name, Size = f.Length, Modified = f.LastWriteTime }; }
+            }
+            catch { }
+            return null;
+        }
+        static ItemInfo EntryInfo(FileEntry e) { return e == null ? null : new ItemInfo { Name = e.Name, Folder = e.Kind == "folder", Size = e.Size, Modified = e.Modified }; }
+        // What is already in a Linux folder is known from its listing when that folder is the one on screen.
+        ItemInfo LinuxExisting(string device, string folder, string name)
+        {
+            if (lin.Location.Kind != "folder" || lin.Location.Device != device || lin.Location.Path != folder) return null;
+            return EntryInfo(lin.List.Items.Cast<ListViewItem>().Select(i => (FileEntry)i.Tag)
+                .FirstOrDefault(e => string.Equals(e.Name, name, StringComparison.OrdinalIgnoreCase)));
+        }
+        // Decides each item's destination name. Same folder: "name - 複製". A name that exists: ask to replace,
+        // keep both ("name (2)") or skip. False when the user cancels; skipped items are removed from paths.
+        bool PlanNames(List<string> paths, Func<string, ItemInfo> source, Func<string, ItemInfo> existing, bool sameFolder, string sourcePlace, string destPlace, out List<string> names, out List<string> replace)
+        {
+            var chosen = new List<string>(); var replaced = new List<string>(); names = chosen; replace = replaced;
+            var taken = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            Func<string, bool> free = n => !taken.Contains(n) && existing(n) == null;
+            int left = sameFolder ? 0 : paths.Count(p => existing(Leaf(p)) != null);
+            string always = null; var keep = new List<string>();
+            foreach (string p in paths)
+            {
+                string leaf = Leaf(p), name = leaf;
+                var src = source(p) ?? new ItemInfo { Name = leaf };
+                var dst = sameFolder ? null : existing(leaf);
+                if (sameFolder) name = NextName(leaf, src.Folder, T(" - 複製"), T(" - 複製 ({0})"), free);
+                else if (dst != null)
+                {
+                    left--;
+                    src.Place = sourcePlace; dst.Place = destPlace;
+                    bool canReplace = src.Folder == dst.Folder;   // a file cannot replace a folder or the other way round
+                    string choice = always;
+                    if (choice == null)
+                    {
+                        bool all;
+                        choice = AskConflict(src, dst, canReplace, left, out all);
+                        if (choice == null) return false;
+                        if (all) always = choice;
+                    }
+                    if (choice == "replace" && !canReplace) choice = "both";
+                    if (choice == "skip") continue;
+                    if (choice == "replace") replaced.Add(leaf);
+                    else name = NextName(leaf, src.Folder, null, " ({0})", free);
+                }
+                keep.Add(p); chosen.Add(name); taken.Add(name);
+            }
+            paths.Clear(); paths.AddRange(keep);
+            return true;
+        }
+        static string NextName(string name, bool folder, string first, string numbered, Func<string, bool> free)
+        {
+            int dot = folder ? -1 : name.LastIndexOf('.');
+            string stem = dot > 0 ? name.Substring(0, dot) : name, ext = dot > 0 ? name.Substring(dot) : "";
+            if (first != null && free(stem + first + ext)) return stem + first + ext;
+            for (int n = 2; ; n++) { string candidate = stem + string.Format(numbered, n) + ext; if (free(candidate)) return candidate; }
+        }
+        string AskConflict(ItemInfo src, ItemInfo dst, bool canReplace, int left, out bool all)
+        {
+            string choice = null; CheckBox applyAll;
+            using (var dialog = ConflictDialog(src, dst, canReplace, left, c => choice = c, out applyAll))
+            {
+                dialog.ShowDialog(form);
+                all = applyAll.Checked;
+            }
+            return choice;
+        }
+        // Explorer-style comparison: what is being pasted on the left, what is already there on the right.
+        Form ConflictDialog(ItemInfo src, ItemInfo dst, bool canReplace, int left, Action<string> choose, out CheckBox applyAll)
+        {
+            var dialog = NewDialog(T("取代或略過"), 760, 356);
+            NewText(dialog, string.Format(dst.Folder ? T("目的地已經有名為「{0}」的資料夾") : T("目的地已經有名為「{0}」的檔案"), dst.Name), 24, 18, 712, 28, headlineFont);
+            bool same = !src.Folder && !dst.Folder && src.Size == dst.Size && Math.Abs((src.Modified - dst.Modified).TotalSeconds) < 2;
+            NewText(dialog, !canReplace ? T("檔案和資料夾不能互相取代，可以保留兩者或略過。")
+                : same ? T("兩個檔案的大小和修改時間都相同，可能是同一個檔案。")
+                : dst.Folder ? T("取代會把兩個資料夾合併，同名的檔案以要貼上的為準。") : T("比較兩個檔案，選擇要怎麼處理。"),
+                24, 50, 712, 22, captionFont, same ? Theme.Accent : Theme.SecondaryLabel);
+            FileCard(dialog, T("要貼上的"), src, dst, 24);
+            FileCard(dialog, T("目的地現有的"), dst, src, 392);
+            applyAll = new CheckBox { Text = string.Format(T("其餘 {0} 個衝突也這樣處理"), left), Location = new Point(24, 258), Size = new Size(712, 26),
+                Visible = left > 0, BackColor = dialog.BackColor, ForeColor = Theme.Label };
+            dialog.Controls.Add(applyAll);
+            var replaceButton = NewButton(dialog, T("取代"), ButtonKind.Primary, 336, 302, 100, () => { choose("replace"); dialog.Close(); });
+            replaceButton.Enabled = canReplace;
+            NewButton(dialog, T("保留兩者"), ButtonKind.Secondary, 444, 302, 110, () => { choose("both"); dialog.Close(); });
+            NewButton(dialog, T("略過"), ButtonKind.Secondary, 562, 302, 82, () => { choose("skip"); dialog.Close(); });
+            NewButton(dialog, T("取消"), ButtonKind.Plain, 652, 302, 84, () => dialog.Close());
+            dialog.KeyPreview = true;
+            dialog.KeyDown += (s, e) => { if (e.KeyCode == Keys.Escape) dialog.Close(); };
+            return dialog;
+        }
+        void FileCard(Form dialog, string title, ItemInfo item, ItemInfo other, int x)
+        {
+            var card = new Card { Location = new Point(x, 86), Size = new Size(344, 160) };
+            dialog.Controls.Add(card);
+            int px = (int)(40 * scale);
+            Image icon = null;
+            try { icon = ShellIcons.ForFile(item.Name, item.Folder, px); } catch { }
+            card.Controls.Add(new PictureBox { Image = icon, Location = new Point(14, 36), Size = new Size(40, 40), SizeMode = PictureBoxSizeMode.Zoom, BackColor = card.FillColor });
+            NewText(card, item.Name, 64, 34, 266, 22);
+            NewText(card, item.Place, 64, 58, 266, 20, captionFont, Theme.SecondaryLabel);
+            int y = 88;
+            Action<string, string, bool> row = (k, v, mark) =>
+            {
+                NewText(card, k, 14, y, 84, 20, captionFont, Theme.SecondaryLabel);
+                NewText(card, v, 100, y, 232, 20, captionFont, mark ? Theme.Accent : Theme.Label);
+                y += 22;
+            };
+            bool both = !item.Folder && !other.Folder;
+            bool larger = both && item.Size > other.Size, newer = item.Modified > other.Modified.AddSeconds(2);
+            // The card title carries the comparison ("newer · larger"); the matching rows are in the accent colour.
+            var tags = new List<string>(); if (newer) tags.Add(T("較新")); if (larger) tags.Add(T("較大"));
+            var head = NewText(card, title, 14, 10, 150, 20, captionFont, Theme.SecondaryLabel);
+            if (tags.Count > 0) NewText(card, string.Join(" · ", tags), 166, 10, 164, 20, captionFont, Theme.Accent).TextAlign = ContentAlignment.TopRight;
+            row(T("大小"), item.Folder ? T("資料夾") : FormatSize(item.Size) + " (" + item.Size.ToString("N0") + " " + T("位元組") + ")", larger);
+            row(T("修改日期"), item.Modified.ToString("yyyy/MM/dd HH:mm:ss"), newer);
+            string type = item.Folder ? T("檔案資料夾") : "";
+            if (!item.Folder) try { type = ShellIcons.TypeName(item.Name, false); } catch { }
+            row(T("類型"), type, false);
+        }
+
         Clip LinuxSelection()
         {
             var selected = Selected(lin).Where(e => In(e.Kind, "file", "folder")).ToList();
             if (selected.Count == 0) return null;
-            return new Clip { Device = selected[0].Device, Paths = selected.Select(e => e.Path).ToList() };
+            return new Clip { Device = selected[0].Device, Paths = selected.Select(e => e.Path).ToList(), Entries = selected };
         }
         List<string> WinSelectionPaths() { return Selected(win).Where(e => In(e.Kind, "file", "folder")).Select(e => e.Path).ToList(); }
         // Cut is a copy whose sources are deleted once the copy has succeeded (and been verified).
         void CopySelection(Pane pane, bool cut = false)
         {
-            if (pane == lin) { linuxClip = LinuxSelection(); if (linuxClip != null) linuxClip.Cut = cut && lin.Location.Kind == "folder"; }
+            if (pane == lin)
+            {
+                linuxClip = LinuxSelection();
+                if (linuxClip != null)
+                {
+                    linuxClip.Cut = cut && lin.Location.Kind == "folder";
+                    // Also on the Windows clipboard, so Explorer and the desktop can paste it (fetched at paste time).
+                    try { Directory.Delete(Path.Combine(Core.Runtime, "clip"), true); } catch { }
+                    try { Clipboard.SetDataObject(new LinuxClipData(this, linuxClip), false); } catch { }
+                }
+            }
             else
             {
                 var paths = WinSelectionPaths();
@@ -174,6 +328,8 @@ namespace UsbProxy
         void PasteInto(Pane pane)
         {
             if (busy) return;
+            // Something copied elsewhere since (e.g. in Explorer) replaces the Linux selection, as on any clipboard.
+            try { if (linuxClip != null && !Clipboard.ContainsData(LinuxClipData.Marker)) linuxClip = null; } catch { }
             if (pane == lin)
             {
                 if (lin.Location.Kind != "folder") return;
@@ -186,6 +342,48 @@ namespace UsbProxy
                 else if (Clipboard.ContainsFileDropList()) PasteWindowsFiles(Clipboard.GetFileDropList().Cast<string>().ToList(), win.Location.Path, ClipboardIsCut());
             }
         }
+        // Linux files on the Windows clipboard. Explorer asks for the file list only when it pastes; the files are
+        // then downloaded (SHA-256 verified) into runtime\clip and handed over. A Linux cut pasted in Explorer copies.
+        class LinuxClipData : DataObject
+        {
+            public const string Marker = "UsbProxyLinuxClip";
+            readonly MainUi ui; readonly Clip clip; string[] files;
+            public LinuxClipData(MainUi ui, Clip clip)
+            {
+                this.ui = ui; this.clip = clip;
+                SetData(DataFormats.FileDrop, new string[0]);   // advertises the format; filled in GetData
+                SetData("Preferred DropEffect", new MemoryStream(BitConverter.GetBytes(5)));
+                SetData(Marker, "1");
+            }
+            public override object GetData(string format, bool autoConvert)
+            {
+                if (format == DataFormats.FileDrop) return files ?? (files = ui.FetchClip(clip));
+                return base.GetData(format, autoConvert);
+            }
+        }
+        string[] FetchClip(Clip clip)
+        {
+            if (busy) { SetMessage(T("請等目前的工作完成後再貼上。")); return null; }
+            string dir = Path.Combine(Core.Runtime, "clip", Core.NewId());
+            Directory.CreateDirectory(dir);
+            var request = Req("action", "download", "device", clip.Device, "paths", clip.Paths.ToArray(), "destination", dir);
+            SetBusy(true); SetMessage(T("正在從 Linux 取出檔案…"));
+            Map response = null;
+            // Runs off the UI thread; the window keeps painting while Explorer waits for the files.
+            var thread = new Thread(() => { try { response = Worker.Run(request); } catch (Exception e) { response = Req("ok", false, "error", e.Message); } }) { IsBackground = true };
+            thread.Start();
+            while (thread.IsAlive) { Application.DoEvents(); Thread.Sleep(30); }
+            SetBusy(false);
+            if (!J.B(response, "ok"))
+            {
+                LogLine(T("失敗：") + T("貼上") + " — " + J.S(response, "error"));
+                SetMessage(T("操作失敗：") + J.S(response, "error"));
+                return null;
+            }
+            SetMessage(T("已從 Linux 取出，交給 Windows 貼上"));
+            return clip.Paths.Select(p => Path.Combine(dir, p.TrimEnd('/').Split('/').Last())).ToArray();
+        }
+
         // Windows to Windows: the shell's own copy/move, with its progress and replace dialogs.
         void PasteWindowsFiles(List<string> paths, string folder, bool move)
         {
@@ -597,7 +795,7 @@ namespace UsbProxy
         // ---------------- Background jobs ----------------
         void BeginOperation(Map request)
         {
-            if (busy) return;
+            if (busy || updating) return;
             string action = J.S(request, "action");
             if (action == "start") { request["cpus"] = UiI("cpus"); request["memory"] = UiI("memory"); }
             if (action == "status" || action == "attach") request["remember"] = UiB("autoLinux");
@@ -819,6 +1017,7 @@ namespace UsbProxy
                 else if (next.Op != null) BeginOperation(next.Op);
             }
             UpdateCounts();
+            if (!busy && pendingUpdate != null) { var info = pendingUpdate; pendingUpdate = null; InstallUpdate(info); }
         }
 
         // What each finished job changes in the window.
@@ -987,7 +1186,7 @@ namespace UsbProxy
                 {
                     e.Cancel = true; MessageBox.Show(T("正在處理隨身碟上的檔案，請等待完成再關閉，以免資料損壞。"), "USB Proxy"); return;
                 }
-                if (!shutdown && MessageBox.Show(T("仍在啟動或檢查 Linux。要中止並關閉視窗嗎？（Linux 會在背景繼續開機，下次開啟時自動接上）"), "USB Proxy", MessageBoxButtons.OKCancel, MessageBoxIcon.Question) != DialogResult.OK) { e.Cancel = true; return; }
+                if (!shutdown && !relaunch && MessageBox.Show(T("仍在啟動或檢查 Linux。要中止並關閉視窗嗎？（Linux 會在背景繼續開機，下次開啟時自動接上）"), "USB Proxy", MessageBoxButtons.OKCancel, MessageBoxIcon.Question) != DialogResult.OK) { e.Cancel = true; return; }
             }
             SaveWindowState();
             if (!shutdown) return;   // Linux and its drives keep running for next time

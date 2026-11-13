@@ -203,30 +203,32 @@ def write_verified(source, target, expected, progress, label, index, overwrite=F
             os.unlink(temporary)
 
 
-def collect(root, paths):
-    """Files and folders under the selected volume-relative paths, keyed by name relative to their parent."""
+def collect(root, paths, names=None):
+    """Files and folders under the selected volume-relative paths, keyed by name relative to their parent.
+    names (parallel to paths) gives a selected item a different top-level name at the destination."""
     files, folders = [], []
-    for relative in paths:
+    for i, relative in enumerate(paths):
         target, rel = resolve(root, relative)
         if target == root:
             raise ValueError('Select files or folders, not the whole volume')
         if target.is_symlink() or not target.exists():
             raise ValueError('Not found: ' + rel)
-        base = target.parent
+        top = names[i] if names and i < len(names) and names[i] else target.name
+        check_name(top)
         if target.is_file():
-            files.append((target, str(PurePosixPath(target.relative_to(base)))))
+            files.append((target, top))
             continue
-        folders.append(str(PurePosixPath(target.relative_to(base))))
-        for current, dirs, names in os.walk(target, followlinks=False):
+        folders.append(top)
+        for current, dirs, entries in os.walk(target, followlinks=False):
             here = Path(current)
             dirs[:] = sorted(d for d in dirs if not (here / d).is_symlink())
             for d in dirs:
-                folders.append(str(PurePosixPath((here / d).relative_to(base))))
-            for name in sorted(names):
+                folders.append(str(PurePosixPath(top, (here / d).relative_to(target))))
+            for name in sorted(entries):
                 path = here / name
                 if path.is_symlink() or not path.is_file() or name.startswith('.usbproxy-'):
                     continue
-                files.append((path, str(PurePosixPath(path.relative_to(base)))))
+                files.append((path, str(PurePosixPath(top, path.relative_to(target)))))
     return files, folders
 
 
@@ -256,7 +258,7 @@ def listing(request):
 def walk(request):
     """List every file under the selection so the host can download folders."""
     root = mount(request['device'])['root']
-    files, folders = collect(root, request['paths'])
+    files, folders = collect(root, request['paths'], request.get('names'))
     return {'files': [{'path': str(p.relative_to(root)), 'relative': r, 'size': p.stat().st_size}
                       for p, r in files],
             'folders': folders}
@@ -358,7 +360,8 @@ def copy(request):
             raise ValueError('Duplicate destination filename')
         seen.add(str(rel).casefold())
         target = base.joinpath(*rel.parts)
-        check_destination(root, target, overwrite)
+        # The user chose "replace" for this item (regular files only; folders merge).
+        check_destination(root, target, overwrite or bool(entry.get('overwrite')))
         source = spool / entry['blob']
         if source.parent != spool or source.is_symlink() or not source.is_file():
             raise ValueError('Invalid source file')
@@ -370,7 +373,7 @@ def copy(request):
     # Progress counts each byte twice: written to the USB, then read back for verification.
     progress = Progress(spool / '.progress', 2 * required, len(checked))
     for index, (source, target, entry) in enumerate(checked, 1):
-        write_verified(source, target, entry['sha256'], progress, entry['relative'], index, overwrite)
+        write_verified(source, target, entry['sha256'], progress, entry['relative'], index, overwrite or bool(entry.get('overwrite')))
     os.sync()
     shutil.rmtree(spool)
     return {'copied': [e['relative'] for _, _, e in checked], 'bytes': required, 'verified': True}
@@ -384,7 +387,9 @@ def transfer(request):
     base, _ = resolve(destination['root'], request.get('dest', ''))
     if not base.is_dir():
         raise ValueError('Destination folder not found')
-    files, folders = collect(source['root'], request['paths'])
+    files, folders = collect(source['root'], request['paths'], request.get('names'))
+    # Top-level names the user chose to replace: their files overwrite, their folders merge.
+    replaced = set(request.get('replace') or [])
     for relative in request['paths']:
         selected, _ = resolve(source['root'], relative)
         if selected.is_dir() and (base == selected or selected in base.parents):
@@ -392,10 +397,13 @@ def transfer(request):
     targets = []
     for relative in folders:
         check_relative(relative)
-        check_destination(destination['root'], base / relative)
+        folder = base / relative
+        if relative.split('/')[0] in replaced and folder.is_dir() and not folder.is_symlink():
+            continue
+        check_destination(destination['root'], folder)
     for path, relative in files:
         target = base / check_relative(relative)
-        check_destination(destination['root'], target)
+        check_destination(destination['root'], target, relative.split('/')[0] in replaced)
         if destination['fstype'] == 'vfat' and path.stat().st_size >= 4294967296:
             raise ValueError('FAT32 does not support files of 4 GiB or larger: ' + relative)
         targets.append((path, target, relative))
@@ -406,7 +414,7 @@ def transfer(request):
     for relative in folders:
         (base / relative).mkdir(parents=True, exist_ok=True)
     for index, (path, target, relative) in enumerate(targets, 1):
-        write_verified(path, target, None, progress, relative, index)
+        write_verified(path, target, None, progress, relative, index, relative.split('/')[0] in replaced)
     os.sync()
     return {'copied': [r for _, _, r in targets], 'bytes': required, 'verified': True}
 

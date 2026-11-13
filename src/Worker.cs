@@ -452,21 +452,26 @@ namespace UsbProxy
             };
         }
 
-        class PlanItem { public FileInfo Source; public string Relative; }
+        class PlanItem { public FileInfo Source; public string Relative; public bool Replace; }
 
         // Files to copy with their destination paths; folders keep their own name as the top level.
         static List<PlanItem> CopyPlan(Map request)
         {
             var plan = new List<PlanItem>();
             var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            foreach (string path in J.Strings(request, "paths"))
+            // Optional per-item destination names (parallel to paths) and the names the user chose to replace.
+            var paths = J.Strings(request, "paths"); var tops = J.Strings(request, "names");
+            var replace = new HashSet<string>(J.Strings(request, "replace"), StringComparer.OrdinalIgnoreCase);
+            for (int index = 0; index < paths.Count; index++)
             {
+                string path = paths[index];
                 var attributes = File.GetAttributes(path);
                 if ((attributes & FileAttributes.ReparsePoint) != 0) throw new ToolException("Symbolic links and junctions are not supported.");
                 if ((attributes & FileAttributes.Directory) != 0)
                 {
                     // Enumerate explicitly so a junction cannot escape the selected directory.
                     var top = new DirectoryInfo(path);
+                    string topName = index < tops.Count && tops[index] != "" ? tops[index] : top.Name;
                     string baseDir = top.Parent.FullName.TrimEnd('\\') + "\\";
                     var queue = new Queue<DirectoryInfo>(); queue.Enqueue(top);
                     while (queue.Count > 0)
@@ -475,9 +480,9 @@ namespace UsbProxy
                         {
                             if ((child.Attributes & FileAttributes.ReparsePoint) != 0) throw new ToolException("Symbolic link/junction found: " + child.FullName);
                             if (child is DirectoryInfo) { queue.Enqueue((DirectoryInfo)child); continue; }
-                            string relative = child.FullName.Substring(baseDir.Length).Replace('\\', '/');
+                            string relative = topName + child.FullName.Substring(baseDir.Length + top.Name.Length).Replace('\\', '/');
                             if (!names.Add(relative)) throw new ToolException("Duplicate destination: " + relative);
-                            plan.Add(new PlanItem { Source = (FileInfo)child, Relative = relative });
+                            plan.Add(new PlanItem { Source = (FileInfo)child, Relative = relative, Replace = replace.Contains(topName) });
                         }
                     }
                 }
@@ -485,9 +490,9 @@ namespace UsbProxy
                 {
                     var file = new FileInfo(path);
                     // Write-back of an opened file keeps its original name on the USB volume.
-                    string relative = J.S(request, "targetName") != "" ? J.S(request, "targetName") : file.Name;
+                    string relative = J.S(request, "targetName") != "" ? J.S(request, "targetName") : index < tops.Count && tops[index] != "" ? tops[index] : file.Name;
                     if (!names.Add(relative)) throw new ToolException("Duplicate destination: " + relative);
-                    plan.Add(new PlanItem { Source = file, Relative = relative });
+                    plan.Add(new PlanItem { Source = file, Relative = relative, Replace = replace.Contains(relative) });
                 }
             }
             return plan;
@@ -556,7 +561,7 @@ namespace UsbProxy
                         }
                         int pad = (int)((512 - (size % 512)) % 512);
                         if (pad > 0) output.Write(zeros, 0, pad);
-                        files.Add(J.Obj("relative", item.Relative, "blob", blob, "size", size, "sha256", hash));
+                        files.Add(J.Obj("relative", item.Relative, "blob", blob, "size", size, "sha256", hash, "overwrite", item.Replace));
                     }
                     byte[] manifest = Core.Utf8.GetBytes(J.Write(J.Obj("files", files.ToArray())));
                     output.Write(TarHeader("manifest.json", manifest.Length), 0, 512);
@@ -939,24 +944,27 @@ namespace UsbProxy
             try
             {
                 return Core.Guest(config, J.Obj("action", "transfer", "source", J.S(request, "source"), "device", J.S(request, "device"),
-                    "paths", J.Strings(request, "paths").ToArray(), "dest", J.S(request, "dest"), "spool", remote), 7200, GuestProgressPoll(config, remote, true, 0));
+                    "paths", J.Strings(request, "paths").ToArray(), "names", J.Strings(request, "names").ToArray(), "replace", J.Strings(request, "replace").ToArray(),
+                    "dest", J.S(request, "dest"), "spool", remote), 7200, GuestProgressPoll(config, remote, true, 0));
             }
             finally { try { Core.Ssh(config, "rm -rf -- " + remote); } catch { } }
         }
 
-        // Files and folders from a volume into a Windows folder; existing names are never overwritten.
+        // Files and folders from a volume into a Windows folder; existing names are only replaced when the user chose so.
         static Map Download(Map config, Map request)
         {
             RequireRunning(config);
             string destination = J.S(request, "destination");
             if (!Directory.Exists(destination)) throw new ToolException("Destination folder not found.");
-            var plan = Core.Guest(config, J.Obj("action", "walk", "device", J.S(request, "device"), "paths", J.Strings(request, "paths").ToArray()), 600);
+            var plan = Core.Guest(config, J.Obj("action", "walk", "device", J.S(request, "device"), "paths", J.Strings(request, "paths").ToArray(), "names", J.Strings(request, "names").ToArray()), 600);
+            var replace = new HashSet<string>(J.Strings(request, "replace"), StringComparer.OrdinalIgnoreCase);
             var files = J.Maps(plan, "files");
             var folders = J.Strings(plan, "folders");
             Func<string, string> toLocal = relative => Path.Combine(destination, string.Join("\\", relative.Split('/').Select(WindowsName)));
             foreach (string item in files.Select(f => J.S(f, "relative")).Concat(folders))
             {
                 string top = Path.Combine(destination, WindowsName(item.Split('/')[0]));
+                if (replace.Contains(item.Split('/')[0])) continue;
                 if (File.Exists(top) || Directory.Exists(top)) throw new ToolException("Already exists on this PC: " + Path.GetFileName(top));
             }
             long total = files.Sum(f => J.L(f, "size"));
@@ -973,6 +981,7 @@ namespace UsbProxy
                 try
                 {
                     ReceiveStream(config, J.Obj("action", "stream", "device", J.S(request, "device"), "path", J.S(file, "path")), partial, J.S(file, "relative"), index);
+                    if (replace.Contains(J.S(file, "relative").Split('/')[0]) && File.Exists(target)) File.Delete(target);
                     File.Move(partial, target);
                 }
                 catch { try { File.Delete(partial); } catch { } throw; }

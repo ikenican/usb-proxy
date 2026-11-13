@@ -85,7 +85,7 @@ namespace UsbProxy
     }
 
     class OpenFile { public string Local, Remote, Name, Device; public DateTime Stamp; public DateTime? Seen; }
-    class Clip { public string Device; public List<string> Paths; public bool Cut; }
+    class Clip { public string Device; public List<string> Paths; public List<FileEntry> Entries; public bool Cut; }
     class FollowUp
     {
         public Map Op; public bool OfferSetup, RefreshWin, Push, ThenStatus; public Loc Nav;
@@ -126,7 +126,8 @@ namespace UsbProxy
         Clip linuxClip;
         Dictionary<string, string> typeNames = new Dictionary<string, string>();
         Dictionary<string, string> actionNames;
-        bool setupOffered, autoStarted, restartAfter, relaunch;
+        bool setupOffered, autoStarted, restartAfter, relaunch, updating;
+        Map pendingUpdate;   // waits for a file operation to finish
         static readonly string[] quietActions = { "status", "list" };
         DateTime opStarted, bootStarted;
         string bootPhase = "";
@@ -196,6 +197,19 @@ namespace UsbProxy
                 {
                     form.DrawToBitmap(bitmap, new Rectangle(0, 0, form.Width, form.Height));
                     bitmap.Save(Path.Combine(Core.Root, @"logs\ui-preview.png"), System.Drawing.Imaging.ImageFormat.Png);
+                }
+                CheckBox unused;
+                using (var conflict = ConflictDialog(
+                    new ItemInfo { Name = "使用說明.txt", Place = @"C:\Users\Documents", Size = 18432, Modified = new DateTime(2026, 11, 13, 9, 30, 12) },
+                    new ItemInfo { Name = "使用說明.txt", Place = "Linux  ›  SanDisk  ›  docs", Size = 15360, Modified = new DateTime(2026, 11, 2, 18, 5, 40) },
+                    true, 3, c => { }, out unused))
+                {
+                    conflict.Show(); Application.DoEvents();
+                    using (var bitmap = new Bitmap(conflict.Width, conflict.Height))
+                    {
+                        conflict.DrawToBitmap(bitmap, new Rectangle(0, 0, conflict.Width, conflict.Height));
+                        bitmap.Save(Path.Combine(Core.Root, @"logs\ui-conflict.png"), System.Drawing.Imaging.ImageFormat.Png);
+                    }
                 }
                 ui["theme"] = J.S(ui, "theme") == "dark" ? "light" : "dark"; ui["lang"] = J.S(ui, "lang") == "en" ? "zh" : "en";
                 SwapWindow();
@@ -530,16 +544,30 @@ namespace UsbProxy
             if (notes.Length > 600) notes = notes.Substring(0, 600) + "…";
             if (MessageBox.Show(form, string.Format(T("有新版本 {0}（目前 {1}）。要現在更新嗎？更新後程式會自動重新開啟。"), J.S(info, "version"), Updater.Current) + "\n\n" + notes,
                 "USB Proxy", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
-            if (busy || attached.Count > 0) { MessageBox.Show(form, T("請先等工作完成，並退出 Linux 中的隨身碟，再到「設定」按「檢查更新」。"), "USB Proxy"); return; }
-            pendingAction = "update"; SetBusy(true);
-            LogLine(T("正在下載並安裝更新…"));
+            InstallUpdate(info);
+        }
+        // Only program files are replaced; Linux and the drives in it keep running across the restart. Checking or
+        // starting Linux is simply abandoned (as when closing); a copy or other file work is finished first.
+        void InstallUpdate(Map info)
+        {
+            if (busy && !In(pendingAction, "status", "start", "list"))
+            {
+                pendingUpdate = info;
+                SetMessage(string.Format(T("「{0}」完成後會自動更新"), actionNames.ContainsKey(pendingAction) ? actionNames[pendingAction] : pendingAction));
+                return;
+            }
+            updating = true;   // no new operations from here on
+            bool own = !busy;
+            if (own) { pendingAction = "update"; SetBusy(true); }
+            LogLine(T("正在下載並安裝更新…")); SetMessage(T("正在下載並安裝更新…"));
             new Thread(() =>
             {
                 string failed = null;
                 try { Updater.Install(info); } catch (Exception ex) { failed = ex.Message; }
                 form.BeginInvoke((Action)(() =>
                 {
-                    pendingAction = ""; SetBusy(false);
+                    updating = false;
+                    if (own) { pendingAction = ""; SetBusy(false); }
                     if (failed != null) { LogLine(T("更新失敗：") + failed); MessageBox.Show(form, T("更新失敗：") + failed, "USB Proxy"); return; }
                     relaunch = true; form.Close();
                 }));
