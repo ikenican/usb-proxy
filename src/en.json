@@ -219,5 +219,15 @@
  "格式化會清除這個分割區上的所有資料，無法復原。只會格式化這個分割區，不會變更分割表。": "Formatting erases all data on this partition and cannot be undone. Only this partition is formatted; the partition table is not changed.",
  "開始": "Start",
  "確定要把「{0}」格式化為 {1} 嗎？\n\n上面所有的檔案都會被清除，無法復原。": "Format “{0}” as {1}?\n\nAll files on it will be erased. This cannot be undone.",
- "關閉工具時一併關閉 Linux（記住的隨身碟下次開啟會自動接上）": "Shut down Linux when the tool closes (remembered drives are attached again next time)"
+ "關閉工具時一併關閉 Linux（記住的隨身碟下次開啟會自動接上）": "Shut down Linux when the tool closes (remembered drives are attached again next time)",
+ "新增": "New",
+ "文字文件": "Text Document",
+ "新增文字文件": "New Text Document",
+ "新增文字文件 ({0})": "New Text Document ({0})",
+ "剪下": "Cut",
+ " - 複製": " - Copy",
+ " - 複製 ({0})": " - Copy ({0})",
+ "無法建立：": "Cannot create: ",
+ "無法重新命名：": "Cannot rename: ",
+ "確定要將{0}移到資源回收筒嗎？": "Move {0} to the Recycle Bin?"
 }

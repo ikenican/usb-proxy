@@ -77,7 +77,7 @@ namespace UsbProxy
         public ImageList Large;
         public System.Collections.IComparer Sorter;
         public Loc Location = Loc.Pc();
-        public List<Loc> History = new List<Loc>();
+        public List<Loc> History = new List<Loc>(), Forward = new List<Loc>();
         public bool Settling;
         public PillButton Back, Up, Refresh;
         public PopupSelect View;
@@ -85,7 +85,7 @@ namespace UsbProxy
     }
 
     class OpenFile { public string Local, Remote, Name, Device; public DateTime Stamp; public DateTime? Seen; }
-    class Clip { public string Device; public List<string> Paths; }
+    class Clip { public string Device; public List<string> Paths; public bool Cut; }
     class FollowUp
     {
         public Map Op; public bool OfferSetup, RefreshWin, Push, ThenStatus; public Loc Nav;
@@ -563,14 +563,14 @@ namespace UsbProxy
             var old = form; var oldTimer = timer; string oldLog = log.Text;
             bool logShown = logWindow.Visible;
             Loc winLoc = win.Location, linLoc = lin.Location;
-            List<Loc> winHistory = win.History, linHistory = lin.History;
+            List<Loc> winHistory = win.History, linHistory = lin.History, winForward = win.Forward, linForward = lin.Forward;
             old.FormClosing -= OnClosing;
             oldTimer.Stop();
             Build();
             form.StartPosition = FormStartPosition.Manual;
             form.Location = old.WindowState == FormWindowState.Normal ? old.Location : old.RestoreBounds.Location;
             log.Text = oldLog;
-            win.History = winHistory; lin.History = linHistory;
+            win.History = winHistory; lin.History = linHistory; win.Forward = winForward; lin.Forward = linForward;
             ShowWinComputer(); ShowLinComputer(); UpdateState();
             if (winLoc.Kind == "folder") Navigate(win, winLoc, true);
             if (linLoc.Kind == "folder") Navigate(lin, linLoc, true);
@@ -814,7 +814,7 @@ namespace UsbProxy
                 else ShowWinFolder(target.Path);
             }
             catch (Exception e) { MessageBox.Show(T("無法開啟：") + e.Message, "USB Proxy"); return; }
-            if (!noHistory && !pane.Location.Same(target)) pane.History.Add(pane.Location);
+            if (!noHistory && !pane.Location.Same(target)) { pane.History.Add(pane.Location); pane.Forward.Clear(); }
             pane.Location = target;
             UpdateCounts(); UpdateState();
         }
@@ -824,6 +824,16 @@ namespace UsbProxy
             if (pane == lin && busy) return;
             var target = pane.History[pane.History.Count - 1];
             pane.History.RemoveAt(pane.History.Count - 1);
+            pane.Forward.Add(pane.Location);
+            Navigate(pane, target, true);
+        }
+        void GoForward(Pane pane)
+        {
+            if (pane.Forward.Count == 0) return;
+            if (pane == lin && busy) return;
+            var target = pane.Forward[pane.Forward.Count - 1];
+            pane.Forward.RemoveAt(pane.Forward.Count - 1);
+            pane.History.Add(pane.Location);
             Navigate(pane, target, true);
         }
         void GoUp(Pane pane)
@@ -845,7 +855,7 @@ namespace UsbProxy
         }
         void ResetLin()
         {
-            lin.History.Clear();
+            lin.History.Clear(); lin.Forward.Clear();
             lin.Location = Loc.Pc();
             ShowLinComputer();
         }

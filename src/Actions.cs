@@ -8,6 +8,7 @@ using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Windows.Forms;
+using Microsoft.VisualBasic.FileIO;
 using UsbProxyUi;
 using Map = System.Collections.Generic.Dictionary<string, object>;
 
@@ -102,13 +103,28 @@ namespace UsbProxy
             BeginOperation(Req("action", "mkdir", "device", lin.Location.Device, "path", lin.Location.Path, "name", name));
         }
 
+        void NewLinuxTextFile()
+        {
+            if (busy || lin.Location.Kind != "folder") return;
+            var names = lin.List.Items.Cast<ListViewItem>().Select(i => i.Text).ToList();
+            string name = T("新增文字文件") + ".txt"; int n = 2;
+            while (names.Contains(name)) { name = string.Format(T("新增文字文件 ({0})"), n) + ".txt"; n++; }
+            string folder = Path.Combine(Core.Runtime, "new");   // the previous empty file has been copied by now
+            try { Directory.Delete(folder, true); } catch { }
+            Directory.CreateDirectory(folder);
+            string file = Path.Combine(folder, name);
+            File.WriteAllBytes(file, new byte[0]);
+            editAfter = name;
+            CopyToLinux(new[] { file }, lin.Location.Device, lin.Location.Path);
+        }
+
         // Copies in every direction: Windows -> Linux (copy), Linux -> Linux (transfer), Linux -> Windows (download).
-        void CopyToLinux(IEnumerable<string> paths, string device, string folder)
+        void CopyToLinux(IEnumerable<string> paths, string device, string folder, bool move = false)
         {
             var list = paths.Where(p => !string.IsNullOrEmpty(p)).ToArray();
             if (busy || string.IsNullOrEmpty(device) || list.Length == 0) return;
             if (lin.Location.Kind == "folder") followUp = FollowUp.NavTo(lin.Location);
-            BeginOperation(Req("action", "copy", "device", device, "dest", folder, "paths", list));
+            BeginOperation(Req("action", "copy", "device", device, "dest", folder, "paths", list, "move", move));
         }
         void TransferInLinux(Clip clip, string device, string folder)
         {
@@ -116,13 +132,13 @@ namespace UsbProxy
             // Dropping items back into their own folder is a no-op.
             if (clip.Device == device && clip.Paths.All(p => ParentPath(p) == folder)) return;
             if (lin.Location.Kind == "folder") followUp = FollowUp.NavTo(lin.Location);
-            BeginOperation(Req("action", "transfer", "source", clip.Device, "paths", clip.Paths.ToArray(), "device", device, "dest", folder));
+            BeginOperation(Req("action", "transfer", "source", clip.Device, "paths", clip.Paths.ToArray(), "device", device, "dest", folder, "move", clip.Cut));
         }
         void DownloadToWindows(Clip clip, string folder)
         {
             if (busy || clip == null || string.IsNullOrEmpty(folder)) return;
             followUp = new FollowUp { RefreshWin = true };
-            BeginOperation(Req("action", "download", "device", clip.Device, "paths", clip.Paths.ToArray(), "destination", folder));
+            BeginOperation(Req("action", "download", "device", clip.Device, "paths", clip.Paths.ToArray(), "destination", folder, "move", clip.Cut));
         }
         Clip LinuxSelection()
         {
@@ -131,20 +147,29 @@ namespace UsbProxy
             return new Clip { Device = selected[0].Device, Paths = selected.Select(e => e.Path).ToList() };
         }
         List<string> WinSelectionPaths() { return Selected(win).Where(e => In(e.Kind, "file", "folder")).Select(e => e.Path).ToList(); }
-        void CopySelection(Pane pane)
+        // Cut is a copy whose sources are deleted once the copy has succeeded (and been verified).
+        void CopySelection(Pane pane, bool cut = false)
         {
-            if (pane == lin) linuxClip = LinuxSelection();
+            if (pane == lin) { linuxClip = LinuxSelection(); if (linuxClip != null) linuxClip.Cut = cut && lin.Location.Kind == "folder"; }
             else
             {
                 var paths = WinSelectionPaths();
                 if (paths.Count > 0)
                 {
+                    // The same clipboard format as Explorer, so cut/copy also pastes there and Explorer's pastes here.
                     var collection = new StringCollection(); collection.AddRange(paths.ToArray());
-                    Clipboard.SetFileDropList(collection);
+                    var data = new DataObject(); data.SetFileDropList(collection);
+                    data.SetData("Preferred DropEffect", new MemoryStream(BitConverter.GetBytes(cut ? 2 : 5)));
+                    Clipboard.SetDataObject(data, true);
                     linuxClip = null;
                 }
             }
             UpdateCounts();
+        }
+        static bool ClipboardIsCut()
+        {
+            try { var s = Clipboard.GetData("Preferred DropEffect") as MemoryStream; return s != null && (s.ReadByte() & 2) != 0; }
+            catch { return false; }
         }
         void PasteInto(Pane pane)
         {
@@ -153,9 +178,84 @@ namespace UsbProxy
             {
                 if (lin.Location.Kind != "folder") return;
                 if (linuxClip != null) TransferInLinux(linuxClip, lin.Location.Device, lin.Location.Path);
-                else if (Clipboard.ContainsFileDropList()) CopyToLinux(Clipboard.GetFileDropList().Cast<string>(), lin.Location.Device, lin.Location.Path);
+                else if (Clipboard.ContainsFileDropList()) CopyToLinux(Clipboard.GetFileDropList().Cast<string>(), lin.Location.Device, lin.Location.Path, ClipboardIsCut());
             }
-            else if (win.Location.Kind == "folder" && linuxClip != null) DownloadToWindows(linuxClip, win.Location.Path);
+            else if (win.Location.Kind == "folder")
+            {
+                if (linuxClip != null) DownloadToWindows(linuxClip, win.Location.Path);
+                else if (Clipboard.ContainsFileDropList()) PasteWindowsFiles(Clipboard.GetFileDropList().Cast<string>().ToList(), win.Location.Path, ClipboardIsCut());
+            }
+        }
+        // Windows to Windows: the shell's own copy/move, with its progress and replace dialogs.
+        void PasteWindowsFiles(List<string> paths, string folder, bool move)
+        {
+            foreach (string src in paths)
+            {
+                string name = Path.GetFileName(src.TrimEnd('\\'));
+                string dest = Path.Combine(folder, name);
+                bool sameFolder = string.Equals(Path.GetDirectoryName(src.TrimEnd('\\')), folder.TrimEnd('\\'), StringComparison.OrdinalIgnoreCase);
+                if (sameFolder)
+                {
+                    if (move) continue;
+                    string stem = Directory.Exists(src) ? name : Path.GetFileNameWithoutExtension(name), ext = Directory.Exists(src) ? "" : Path.GetExtension(name);
+                    dest = Path.Combine(folder, stem + T(" - 複製") + ext);
+                    for (int n = 2; File.Exists(dest) || Directory.Exists(dest); n++) dest = Path.Combine(folder, stem + string.Format(T(" - 複製 ({0})"), n) + ext);
+                }
+                try
+                {
+                    if (Directory.Exists(src)) { if (move) FileSystem.MoveDirectory(src, dest, UIOption.AllDialogs); else FileSystem.CopyDirectory(src, dest, UIOption.AllDialogs); }
+                    else if (move) FileSystem.MoveFile(src, dest, UIOption.AllDialogs); else FileSystem.CopyFile(src, dest, UIOption.AllDialogs);
+                }
+                catch (OperationCanceledException) { break; }
+                catch (Exception e) { MessageBox.Show(e.Message, "USB Proxy"); break; }
+            }
+            if (move) Clipboard.Clear();
+            Navigate(win, win.Location, true);
+        }
+        // Windows-side sources of a finished cut; the Recycle Bin keeps them recoverable.
+        static void RecycleWindows(IEnumerable<string> paths)
+        {
+            foreach (string p in paths)
+                try
+                {
+                    if (Directory.Exists(p)) FileSystem.DeleteDirectory(p, UIOption.OnlyErrorDialogs, RecycleOption.SendToRecycleBin);
+                    else if (File.Exists(p)) FileSystem.DeleteFile(p, UIOption.OnlyErrorDialogs, RecycleOption.SendToRecycleBin);
+                }
+                catch (OperationCanceledException) { break; }
+                catch (Exception e) { MessageBox.Show(e.Message, "USB Proxy"); break; }
+        }
+
+        // ---------------- Windows side: new, rename, delete ----------------
+        void NewWindowsItem(bool folder)
+        {
+            if (win.Location.Kind != "folder") return;
+            string dir = win.Location.Path, ext = folder ? "" : ".txt";
+            string name = (folder ? T("新增資料夾") : T("新增文字文件")) + ext;
+            for (int n = 2; File.Exists(Path.Combine(dir, name)) || Directory.Exists(Path.Combine(dir, name)); n++)
+                name = string.Format(folder ? T("新增資料夾 ({0})") : T("新增文字文件 ({0})"), n) + ext;
+            try { if (folder) Directory.CreateDirectory(Path.Combine(dir, name)); else File.WriteAllBytes(Path.Combine(dir, name), new byte[0]); }
+            catch (Exception e) { MessageBox.Show(T("無法建立：") + e.Message, "USB Proxy"); return; }
+            Navigate(win, win.Location, true);
+            EditItem(win, name);
+        }
+        static void EditItem(Pane pane, string name)
+        {
+            foreach (ListViewItem item in pane.List.Items)
+                if (item.Text == name) { pane.List.SelectedItems.Clear(); item.Selected = true; item.Focused = true; item.EnsureVisible(); pane.List.Focus(); item.BeginEdit(); return; }
+        }
+        void RenameWindowsItem()
+        {
+            if (win.List.SelectedItems.Count != 1 || win.Location.Kind != "folder") return;
+            win.List.SelectedItems[0].BeginEdit();
+        }
+        void RemoveWindowsItems()
+        {
+            var paths = WinSelectionPaths();
+            if (paths.Count == 0 || win.Location.Kind != "folder") return;
+            string what = paths.Count == 1 ? "「" + Path.GetFileName(paths[0]) + "」" : string.Format(T("這 {0} 個項目"), paths.Count);
+            if (MessageBox.Show(string.Format(T("確定要將{0}移到資源回收筒嗎？"), what), T("刪除"), MessageBoxButtons.OKCancel, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) != DialogResult.OK) return;
+            RecycleWindows(paths);
+            Navigate(win, win.Location, true);
         }
         // Sends the selection to the folder open in the other pane.
         void SendToOtherPane(Pane pane)
@@ -334,21 +434,51 @@ namespace UsbProxy
                 p.List.SelectedIndexChanged += (s, e) => { active = p; UpdateCounts(); };
                 p.List.KeyDown += (s, e) =>
                 {
-                    if (e.Alt && e.KeyCode == Keys.Left) { GoBack(p); e.Handled = true; return; }
-                    if (e.Alt && e.KeyCode == Keys.Up) { GoUp(p); e.Handled = true; return; }
-                    if (e.Control && e.KeyCode == Keys.A) { foreach (ListViewItem item in p.List.Items) item.Selected = true; e.Handled = true; return; }
-                    if (e.Control && e.KeyCode == Keys.C) { CopySelection(p); e.Handled = true; return; }
-                    if (e.Control && e.KeyCode == Keys.V) { PasteInto(p); e.Handled = true; return; }
-                    switch (e.KeyCode)
+                    switch (e.KeyData)
                     {
-                        case Keys.Back: GoBack(p); break;
-                        case Keys.F5: RefreshPane(p); break;
-                        case Keys.Delete: if (p == lin) RemoveLinuxItems(); break;
-                        case Keys.F2: if (p == lin) RenameLinuxItem(); break;
+                        case Keys.Alt | Keys.Left: case Keys.Back: case Keys.BrowserBack: GoBack(p); break;
+                        case Keys.Alt | Keys.Right: case Keys.BrowserForward: GoForward(p); break;
+                        case Keys.Alt | Keys.Up: GoUp(p); break;
+                        case Keys.Control | Keys.A: foreach (ListViewItem item in p.List.Items) item.Selected = true; break;
+                        case Keys.Control | Keys.C: CopySelection(p); break;
+                        case Keys.Control | Keys.X: CopySelection(p, true); break;
+                        case Keys.Control | Keys.V: PasteInto(p); break;
+                        case Keys.F5: case Keys.Control | Keys.R: case Keys.BrowserRefresh: RefreshPane(p); break;
+                        case Keys.Delete: if (p == lin) RemoveLinuxItems(); else RemoveWindowsItems(); break;
+                        case Keys.F2: if (p == lin) RenameLinuxItem(); else RenameWindowsItem(); break;
+                        case Keys.Control | Keys.Shift | Keys.N: if (p == lin) NewLinuxFolder(); else NewWindowsItem(true); break;
+                        case Keys.Alt | Keys.Enter: if (p == lin) ShowLinuxInfo(); break;
+                        default: return;
                     }
+                    e.Handled = e.SuppressKeyPress = true;
                 };
+                // Mouse side buttons go back and forward, as in Explorer.
+                MouseEventHandler sideButtons = (s, e) =>
+                {
+                    if (e.Button == MouseButtons.XButton1) GoBack(p);
+                    else if (e.Button == MouseButtons.XButton2) GoForward(p);
+                };
+                p.List.MouseDown += sideButtons; p.Empty.MouseDown += sideButtons;
+                // An empty folder shows a label over the list; clicking it keeps the keyboard shortcuts working.
+                p.Empty.MouseDown += (s, e) => p.List.Focus();
                 SetZoom(p, UiI("zoom_" + p.Key));
             }
+            win.List.LabelEdit = true;
+            win.List.BeforeLabelEdit += (s, e) => { if (win.Location.Kind != "folder" || !In(((FileEntry)win.List.Items[e.Item].Tag).Kind, "file", "folder")) e.CancelEdit = true; };
+            win.List.AfterLabelEdit += (s, e) =>
+            {
+                var entry = (FileEntry)win.List.Items[e.Item].Tag;
+                string name = e.Label != null ? e.Label.Trim() : "";
+                e.CancelEdit = true;   // the list is re-read after the rename
+                if (name == "" || name == entry.Name) return;
+                try { if (entry.Kind == "folder") FileSystem.RenameDirectory(entry.Path, name); else FileSystem.RenameFile(entry.Path, name); }
+                catch (Exception ex) { MessageBox.Show(T("無法重新命名：") + ex.Message, "USB Proxy"); return; }
+                form.BeginInvoke((Action)(() =>
+                {
+                    Navigate(win, win.Location, true);
+                    foreach (ListViewItem item in win.List.Items) if (item.Text == name) { item.Selected = true; item.Focused = true; item.EnsureVisible(); }
+                }));
+            };
             lin.List.LabelEdit = true;
             lin.List.BeforeLabelEdit += (s, e) => { if (busy || lin.Location.Kind != "folder" || ((FileEntry)lin.List.Items[e.Item].Tag).IsLink) e.CancelEdit = true; };
             lin.List.AfterLabelEdit += (s, e) =>
@@ -373,6 +503,18 @@ namespace UsbProxy
             menu.Items.Add(item);
             return item;
         }
+        ToolStripMenuItem NewSubmenu(ContextMenuStrip menu, Action folder, Action text)
+        {
+            var item = new ToolStripMenuItem(T("新增"));
+            item.DropDown.Renderer = menu.Renderer; item.DropDown.Font = menu.Font;
+            var f = new ToolStripMenuItem(T("資料夾")) { ShortcutKeyDisplayString = "Ctrl+Shift+N" };
+            f.Click += (s, e) => folder();
+            var t = new ToolStripMenuItem(T("文字文件"));
+            t.Click += (s, e) => text();
+            item.DropDownItems.Add(f); item.DropDownItems.Add(t);
+            menu.Items.Add(item);
+            return item;
+        }
         string LocationDrive()
         {
             if (lin.Location.Kind != "folder") return "";
@@ -386,10 +528,14 @@ namespace UsbProxy
             var wOpen = AddMenuItem(winMenu, T("開啟"), () => OpenEntry(win), "Enter");
             var wSwitch = AddMenuItem(winMenu, T("切換到 Linux"), () => SwitchToLinux(Selected(win).FirstOrDefault()));
             var wSend = AddMenuItem(winMenu, T("複製到右側 Linux 資料夾"), () => SendToOtherPane(win));
+            var wCut = AddMenuItem(winMenu, T("剪下"), () => CopySelection(win, true), "Ctrl+X");
             var wCopy = AddMenuItem(winMenu, T("複製"), () => CopySelection(win), "Ctrl+C");
-            var wPaste = AddMenuItem(winMenu, T("貼上（從 Linux）"), () => PasteInto(win), "Ctrl+V");
+            var wPaste = AddMenuItem(winMenu, T("貼上"), () => PasteInto(win), "Ctrl+V");
+            var wRename = AddMenuItem(winMenu, T("重新命名"), RenameWindowsItem, "F2");
+            var wDelete = AddMenuItem(winMenu, T("刪除"), RemoveWindowsItems, "Del");
             var wShow = AddMenuItem(winMenu, T("在檔案總管中顯示"), () => { var e = Selected(win).FirstOrDefault(); if (e != null && !string.IsNullOrEmpty(e.Path)) Process.Start("explorer.exe", "/select,\"" + e.Path + "\""); });
             winMenu.Items.Add(new ToolStripSeparator());
+            var wNew = NewSubmenu(winMenu, () => NewWindowsItem(true), () => NewWindowsItem(false));
             AddMenuItem(winMenu, T("重新整理"), () => RefreshPane(win), "F5");
             winMenu.Opening += (s, e) =>
             {
@@ -398,8 +544,11 @@ namespace UsbProxy
                 wOpen.Visible = selected.Count == 1 && kind != "device";
                 wSwitch.Visible = In(kind, "device", "usb-drive"); wSwitch.Enabled = !busy;
                 wSend.Visible = files > 0; wSend.Enabled = !busy;
-                wCopy.Visible = files > 0;
-                wPaste.Visible = win.Location.Kind == "folder"; wPaste.Enabled = !busy && linuxClip != null;
+                bool inFolder = win.Location.Kind == "folder";
+                wCopy.Visible = files > 0; wCut.Visible = inFolder && files > 0;
+                wPaste.Visible = inFolder; wPaste.Enabled = !busy && (linuxClip != null || Clipboard.ContainsFileDropList());
+                wRename.Visible = inFolder && files == 1 && selected.Count == 1; wDelete.Visible = inFolder && files > 0;
+                wNew.Visible = inFolder && selected.Count == 0;
                 wShow.Visible = selected.Count == 1 && In(kind, "file", "folder");
             };
             win.List.ContextMenuStrip = winMenu; win.Empty.ContextMenuStrip = winMenu;
@@ -408,6 +557,7 @@ namespace UsbProxy
             var lOpen = AddMenuItem(linMenu, T("開啟"), () => OpenEntry(lin), "Enter");
             var lSave = AddMenuItem(linMenu, T("存到電腦…"), SaveLinuxFile);
             var lSend = AddMenuItem(linMenu, T("複製到左側 Windows 資料夾"), () => SendToOtherPane(lin));
+            var lCut = AddMenuItem(linMenu, T("剪下"), () => CopySelection(lin, true), "Ctrl+X");
             var lCopy = AddMenuItem(linMenu, T("複製"), () => CopySelection(lin), "Ctrl+C");
             var lPaste = AddMenuItem(linMenu, T("貼上"), () => PasteInto(lin), "Ctrl+V");
             var lRename = AddMenuItem(linMenu, T("重新命名"), RenameLinuxItem, "F2");
@@ -419,11 +569,11 @@ namespace UsbProxy
             });
             var lFormat = AddMenuItem(linMenu, T("格式化…"), () => { string d = MenuVolume(); if (d != null) ShowFormat(d); });
             linMenu.Items.Add(new ToolStripSeparator());
-            var lNewFolder = AddMenuItem(linMenu, T("新增資料夾"), NewLinuxFolder);
+            var lNew = NewSubmenu(linMenu, NewLinuxFolder, NewLinuxTextFile);
             var lRefresh = AddMenuItem(linMenu, T("重新整理"), () => RefreshPane(lin), "F5");
             var lInfoGap = new ToolStripSeparator();
             linMenu.Items.Add(lInfoGap);
-            var lInfo = AddMenuItem(linMenu, T("內容"), () => { string d = MenuVolume(); if (d != null) BeginOperation(Req("action", "info", "device", d)); });
+            var lInfo = AddMenuItem(linMenu, T("內容"), ShowLinuxInfo, "Alt+Enter");
             linMenu.Opening += (s, e) =>
             {
                 var selected = Selected(lin); bool idle = !busy;
@@ -432,13 +582,14 @@ namespace UsbProxy
                 int files = selected.Count(x => In(x.Kind, "file", "folder"));
                 lOpen.Visible = one;
                 lSave.Visible = inFolder && kind == "file";
-                lSend.Visible = files > 0; lCopy.Visible = files > 0;
+                lSend.Visible = files > 0; lCopy.Visible = files > 0; lCut.Visible = inFolder && files > 0; lCut.Enabled = idle;
                 lPaste.Visible = inFolder; lPaste.Enabled = idle && (linuxClip != null || Clipboard.ContainsFileDropList());
                 lRename.Visible = inFolder && one; lDelete.Visible = inFolder && selected.Count > 0;
                 lEject.Visible = In(kind, "volume", "linux-device") || (inFolder && selected.Count == 0);
-                lNewFolder.Visible = inFolder;
-                lInfo.Visible = lFormat.Visible = lInfoGap.Visible = MenuVolume() != null;
-                foreach (var item in new[] { lOpen, lSave, lSend, lRename, lDelete, lEject, lNewFolder, lRefresh, lInfo, lFormat }) item.Enabled = idle;
+                lNew.Visible = inFolder && selected.Count == 0;
+                lInfo.Visible = lInfoGap.Visible = MenuVolume() != null;
+                lFormat.Visible = kind == "volume";   // like Explorer: only on the drive itself, not inside its folders
+                foreach (var item in new[] { lOpen, lSave, lSend, lRename, lDelete, lEject, lNew, lRefresh, lInfo, lFormat }) item.Enabled = idle;
             };
             lin.List.ContextMenuStrip = linMenu; lin.Empty.ContextMenuStrip = linMenu;
         }
@@ -762,7 +913,7 @@ namespace UsbProxy
                         // Open the drive's only partition; otherwise show every drive in Linux.
                         if (fresh.Count == 1)
                         {
-                            lin.History.Clear(); lin.Location = Loc.Pc();
+                            lin.History.Clear(); lin.Forward.Clear(); lin.Location = Loc.Pc();
                             followUp = new FollowUp { Nav = Loc.LinFolder(fresh[0], ""), Push = true, ThenStatus = true };
                         }
                         else followUp = FollowUp.Do(Req("action", "status"));
@@ -772,7 +923,7 @@ namespace UsbProxy
                     {
                         bool push = pendingNav && pendingNavPush; pendingNav = false;
                         var target = Loc.LinFolder(J.S(request, "device"), J.S(data, "path"));
-                        if (push && !lin.Location.Same(target)) lin.History.Add(lin.Location);
+                        if (push && !lin.Location.Same(target)) { lin.History.Add(lin.Location); lin.Forward.Clear(); }
                         lin.Location = target;
                         ShowLinFolder(data, J.S(request, "device"));
                         break;
@@ -780,12 +931,28 @@ namespace UsbProxy
                 case "copy":
                     if (J.B(request, "overwrite")) LogLine(string.Format(T("已寫回「{0}」，SHA-256 驗證通過。"), J.S(request, "targetName")));
                     else LogLine(string.Format(T("已複製並驗證 {0} 個檔案，共 {1}。"), J.A(data, "copied").Count, FormatSize(J.D(data, "bytes"))));
+                    if (J.B(request, "move"))
+                    {
+                        RecycleWindows(J.Strings(request, "paths"));
+                        try { Clipboard.Clear(); } catch { }
+                        if (win.Location.Kind == "folder") Navigate(win, win.Location, true);
+                    }
+                    break;
+                case "delete":
+                    if (followUp == null && lin.Location.Kind == "folder") followUp = FollowUp.NavTo(lin.Location);
                     break;
                 case "transfer":
                     LogLine(string.Format(T("隨身碟間傳輸完成：{0} 個檔案，共 {1}，SHA-256 驗證通過。"), J.A(data, "copied").Count, FormatSize(J.D(data, "bytes"))));
+                    if (J.B(request, "move")) { linuxClip = null; followUp = FollowUp.Do(Req("action", "delete", "device", J.S(request, "source"), "paths", J.Strings(request, "paths").ToArray())); }
                     break;
                 case "download":
                     LogLine(string.Format(T("已複製 {0} 個檔案（{1}）到 {2}，SHA-256 驗證通過。"), J.I(data, "downloaded"), FormatSize(J.D(data, "bytes")), J.S(data, "destination")));
+                    if (J.B(request, "move"))
+                    {
+                        linuxClip = null;
+                        if (win.Location.Kind == "folder") Navigate(win, win.Location, true);
+                        followUp = FollowUp.Do(Req("action", "delete", "device", J.S(request, "device"), "paths", J.Strings(request, "paths").ToArray()));
+                    }
                     break;
                 case "fetch":
                     if (J.S(data, "saved") != "") LogLine(T("已存到 ") + J.S(data, "saved"));
@@ -859,6 +1026,7 @@ namespace UsbProxy
             if (selected.Count == 0 && lin.Location.Kind == "folder") return lin.Location.Device;
             return null;
         }
+        void ShowLinuxInfo() { string d = MenuVolume(); if (d != null && !busy) BeginOperation(Req("action", "info", "device", d)); }
         static string FsName(string fstype)
         {
             switch (fstype) { case "vfat": return "FAT32"; case "exfat": return "exFAT"; case "ntfs": return "NTFS"; case "ext4": return "ext4"; default: return fstype.ToUpperInvariant(); }
